@@ -12,7 +12,11 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 A personal knowledge base built on the `rubix-documents` Next.js template (MDX + Tailwind).
 The owner is a first-job backend/DevOps engineer writing this to learn and to avoid
-re-looking-up the same things. Repo: `github.com/Putthakun/documentation-dev`.
+re-looking-up the same things.
+
+- Repo: `github.com/Putthakun/documentation-dev`
+- Live: https://antdocumentation.vercel.app — Vercel deploys from `main` automatically,
+  so **pushing to `main` deploys to production**.
 
 ## Communication
 
