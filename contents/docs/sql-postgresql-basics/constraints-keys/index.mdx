@@ -1,0 +1,170 @@
+---
+title: Constraints & Keys
+description: Primary keys, foreign keys, and constraints — letting the database enforce correctness instead of your application.
+keywords: ["primary key", "foreign key", "not null", "unique", "check constraint", "referential integrity", "on delete cascade"]
+---
+
+## Why constraints matter
+
+Constraints are rules the database enforces on every write, no matter where it came from. That's the key point: your Go service might validate input carefully, but a migration script, an admin running SQL by hand, a background job, or a second service can all write to the same table. A constraint is the one check none of them can skip.
+
+<Note title="Application validation and constraints do different jobs" type="success">
+  Validate in the application to give users good error messages. Constrain in the database to
+  guarantee the data is *actually* correct. You want both — they're not redundant. Bad data that
+  reaches a database with no constraints is permanent and expensive to clean up.
+</Note>
+
+## NOT NULL
+
+```sql showLineNumbers
+name TEXT NOT NULL,
+```
+
+Rejects rows where the column is missing. Default to `NOT NULL` and only allow nulls where "unknown" or "not applicable" is a real, meaningful state — because every nullable column complicates every query that reads it (see [NULL handling](/docs/sql-postgresql-basics/querying#working-with-null)).
+
+## UNIQUE
+
+```sql showLineNumbers
+email TEXT NOT NULL UNIQUE,
+
+-- Multi-column: the combination must be unique, not each column separately
+CONSTRAINT one_review_per_user UNIQUE (user_id, product_id)
+```
+
+<Note title="Uniqueness cannot be done reliably in application code" type="warning">
+  The classic bug: `SELECT` to check whether an email exists, then `INSERT` if it doesn't. Two
+  concurrent requests both see "doesn't exist" and both insert. A `UNIQUE` constraint is the only
+  reliable fix — the database rejects the second one. Handle the resulting error (Postgres error
+  code `23505`) rather than trying to prevent it with a pre-check.
+</Note>
+
+## CHECK
+
+Enforce any boolean condition on a row:
+
+```sql showLineNumbers
+price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+quantity    INTEGER NOT NULL CHECK (quantity > 0),
+status      TEXT NOT NULL CHECK (status IN ('pending', 'paid', 'shipped', 'cancelled')),
+
+-- Named, and referencing multiple columns
+CONSTRAINT valid_date_range CHECK (ends_at > starts_at)
+```
+
+Cheap to add and they catch entire categories of bugs — a negative price simply cannot exist in the table.
+
+## Primary keys
+
+The column that uniquely identifies a row. Implies `NOT NULL` + `UNIQUE`, and PostgreSQL creates an index for it automatically:
+
+```sql showLineNumbers
+id BIGSERIAL PRIMARY KEY,
+
+-- Composite: for join tables, where the pair is the identity
+CREATE TABLE order_tags (
+    order_id BIGINT NOT NULL REFERENCES orders(id),
+    tag_id   BIGINT NOT NULL REFERENCES tags(id),
+    PRIMARY KEY (order_id, tag_id)
+);
+```
+
+Every table should have one. Without it, you have no reliable way to reference or update a specific row.
+
+## Foreign keys
+
+A foreign key says "this column must contain a value that exists in that other table." This is **referential integrity** — the guarantee that an order can never point at a user who doesn't exist.
+
+```sql showLineNumbers
+CREATE TABLE orders (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES users(id),
+    product_id BIGINT NOT NULL REFERENCES products(id),
+    quantity   INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0)
+);
+```
+
+<Mermaid chart="graph LR
+  O[orders.user_id] -->|must exist in| U[users.id]
+  O2[orders.product_id] -->|must exist in| P[products.id]" />
+
+Now these both fail, which is exactly what you want:
+
+```sql showLineNumbers
+-- Fails: user 999 doesn't exist
+INSERT INTO orders (user_id, product_id) VALUES (999, 1);
+
+-- Fails: user 1 still has orders referencing them
+DELETE FROM users WHERE id = 1;
+```
+
+### ON DELETE behavior
+
+You control what happens when the referenced row is deleted:
+
+```sql showLineNumbers
+-- Default: block the delete while children exist. Safest.
+user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+
+-- Delete the children too. Powerful and dangerous.
+user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+-- Keep the child row, null out the reference (column must be nullable)
+user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+```
+
+| Option | Deleting a user... |
+|---|---|
+| `RESTRICT` (default) | Fails if they have orders |
+| `CASCADE` | Deletes all their orders too |
+| `SET NULL` | Keeps orders, sets `user_id` to `NULL` |
+
+<Note title="Be careful with CASCADE" type="danger">
+  `ON DELETE CASCADE` can silently delete far more than you expect, following chains several tables
+  deep. It's right for genuinely owned data (deleting an order should delete its line items), and
+  wrong for anything you'd want to keep for records — orders, invoices, audit logs. The default
+  `RESTRICT` forces you to make the decision explicitly, which is usually what you want.
+</Note>
+
+<Note title="Foreign keys are not indexed automatically" type="warning">
+  PostgreSQL indexes the primary key side, but **not** the referencing column. `orders.user_id`
+  has no index unless you create one — and without it, both `WHERE user_id = ?` lookups and
+  cascading deletes do a full table scan. Add it:
+
+  ```sql
+  CREATE INDEX idx_orders_user_id ON orders(user_id);
+  ```
+
+  This is one of the most common causes of slow queries in a young codebase. See
+  [Indexes](/docs/sql-postgresql-basics/indexes).
+</Note>
+
+## Adding constraints later
+
+```sql showLineNumbers
+ALTER TABLE users ADD CONSTRAINT users_email_unique UNIQUE (email);
+ALTER TABLE orders ADD CONSTRAINT orders_qty_positive CHECK (quantity > 0);
+ALTER TABLE orders
+    ADD CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES users(id);
+
+ALTER TABLE orders DROP CONSTRAINT orders_qty_positive;
+```
+
+Adding a constraint fails if existing rows violate it — which is useful information, but means you must clean up the data first.
+
+## Best practices
+
+- **Every table gets a primary key.**
+- **Every reference between tables gets a foreign key.** The small write cost buys you a guarantee that your data is never structurally broken.
+- **Index your foreign key columns.**
+- **Default to `NOT NULL`;** allow nulls deliberately.
+- **Name your constraints** (`orders_qty_positive`) rather than letting PostgreSQL generate names — error messages become readable and dropping them later is straightforward.
+- **Add `CHECK` constraints liberally.** They're nearly free and document your assumptions in the schema itself.
+- **Handle constraint violations as expected errors** in application code, rather than trying to pre-check for them.
+
+<CardGrid>
+  <Card
+    title="Querying Data →"
+    href="/docs/sql-postgresql-basics/querying"
+    description="SELECT, WHERE, ORDER BY, LIMIT — and how NULL behaves."
+  />
+</CardGrid>

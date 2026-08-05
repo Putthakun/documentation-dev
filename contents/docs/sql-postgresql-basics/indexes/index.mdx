@@ -1,0 +1,168 @@
+---
+title: "Indexes: The Basics"
+description: What a database index actually is, when to add one, what it costs, and how to check whether it's being used.
+keywords: ["index", "b-tree", "create index", "explain", "composite index", "sequential scan", "index scan"]
+---
+
+## What an index is
+
+Without an index, finding `WHERE email = 'alice@example.com'` means reading **every row** in the table — a *sequential scan*. That's fine for 100 rows and unusable for 10 million.
+
+An index is a separate, sorted data structure that lets PostgreSQL jump straight to matching rows, much like the index at the back of a book. The default type is a **B-tree**, which suits equality and range comparisons.
+
+<Mermaid chart="graph TD
+  subgraph Without index
+  Q1[WHERE email = x] --> S[Scan all 10,000,000 rows]
+  end
+  subgraph With index
+  Q2[WHERE email = x] --> B[Walk B-tree: ~23 steps]
+  B --> H[Fetch matching row]
+  end" />
+
+## Creating indexes
+
+```sql showLineNumbers
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+
+-- Composite: one index covering several columns
+CREATE INDEX idx_orders_user_status ON orders(user_id, status);
+
+-- Unique index — also enforces uniqueness, like a UNIQUE constraint
+CREATE UNIQUE INDEX idx_users_email ON users(email);
+
+-- Partial: index only some rows, keeping it small
+CREATE INDEX idx_orders_pending ON orders(created_at) WHERE status = 'pending';
+
+DROP INDEX idx_orders_user_id;
+```
+
+<Note title="Use CONCURRENTLY in production" type="warning">
+  A plain `CREATE INDEX` locks the table against writes until it finishes — on a large table that
+  can mean minutes of downtime.
+
+  ```sql
+  CREATE INDEX CONCURRENTLY idx_orders_user_id ON orders(user_id);
+  ```
+
+  This builds the index without blocking writes. It's slower, can't run inside a transaction, and
+  may leave an invalid index if it fails (drop and retry) — but it's the only safe option on a live
+  table.
+</Note>
+
+## What already has an index
+
+PostgreSQL creates indexes automatically for:
+
+- **`PRIMARY KEY`** columns
+- **`UNIQUE`** constraints
+
+It does **not** create one for foreign key columns:
+
+```sql showLineNumbers
+-- orders.user_id REFERENCES users(id) has NO index by default
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+```
+
+<Note title="Index every foreign key column" type="danger">
+  This is the single most common missing index in a young codebase. Without it, `WHERE user_id = $1`
+  does a full table scan, joins on that column are slow, and deleting a user has to scan `orders`
+  to check for references. Add it whenever you add a foreign key.
+</Note>
+
+## When to add an index
+
+Index a column when it appears in:
+
+- **`WHERE` clauses** you run often
+- **`JOIN` conditions** (i.e. foreign keys)
+- **`ORDER BY`** on large tables — a matching index avoids a sort
+- **`UNIQUE` constraints** (automatic)
+
+## What indexes cost
+
+Indexes aren't free, which is why "index everything" is the wrong strategy:
+
+- **Writes get slower.** Every `INSERT`, `UPDATE`, and `DELETE` must update every affected index. A table with 8 indexes has substantially slower writes than one with 2.
+- **They consume disk and memory.** An index on a large table can be gigabytes, competing for cache space with your actual data.
+- **They need maintenance.** More indexes mean more vacuum work.
+
+<Note title="Rule of thumb" type="success">
+  Add indexes in response to **real slow queries**, not in anticipation. Start with primary keys,
+  unique constraints, and foreign keys — then add more only when a specific query is measurably
+  slow. Unused indexes are pure cost.
+</Note>
+
+## Composite index column order matters
+
+A composite index works **left to right**. `(user_id, status)` can serve:
+
+```sql showLineNumbers
+WHERE user_id = 1                      -- yes, uses the index
+WHERE user_id = 1 AND status = 'paid'  -- yes, uses both columns
+WHERE status = 'paid'                  -- NO — status is not the leading column
+```
+
+Put the column used for **equality** first, and the more selective column first when both are equality checks. A separate index on `status` alone would be needed for that last query.
+
+## Checking whether an index is used
+
+`EXPLAIN` shows the plan; `EXPLAIN ANALYZE` actually runs the query and reports real timings:
+
+```sql showLineNumbers
+EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 42;
+```
+
+```text showLineNumbers
+Index Scan using idx_orders_user_id on orders  (cost=0.29..8.31 rows=1 width=48)
+                                               (actual time=0.021..0.023 rows=3 loops=1)
+  Index Cond: (user_id = 42)
+Planning Time: 0.083 ms
+Execution Time: 0.041 ms
+```
+
+What to look for:
+
+| Plan node | Meaning |
+|---|---|
+| `Index Scan` | Using an index — good |
+| `Index Only Scan` | Answered entirely from the index, no table access — best |
+| `Bitmap Heap Scan` | Index used for many matching rows — usually fine |
+| `Seq Scan` | Reading the whole table — fine on small tables, a red flag on large ones |
+
+<Note title="A Seq Scan is not always wrong" type="warning">
+  If a query matches a large fraction of the table, scanning sequentially is genuinely faster than
+  bouncing through an index — and the planner knows this. On a table with 50 rows it will always
+  seq scan, because that's cheaper. Judge by execution time on realistic data volumes, not by the
+  plan node alone.
+</Note>
+
+## Finding unused indexes
+
+```sql showLineNumbers
+SELECT relname AS table, indexrelname AS index, idx_scan AS times_used
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+ORDER BY relname;
+```
+
+Indexes with `idx_scan = 0` have never been used since statistics were last reset — candidates for removal (excluding those backing constraints).
+
+## Best practices
+
+- **Index every foreign key column.**
+- **Add indexes for measured slow queries**, not speculatively.
+- **Use `CREATE INDEX CONCURRENTLY`** on production tables.
+- **Mind composite column order** — leftmost columns are what count.
+- **Name indexes consistently**, e.g. `idx_<table>_<columns>`.
+- **Verify with `EXPLAIN ANALYZE`** on realistic data volumes — an index that isn't used is worse than no index.
+- **Review and drop unused indexes** periodically.
+
+Query plans in depth, index types beyond B-tree (GIN, GiST, BRIN), and diagnosing N+1 queries are covered in [Query Optimization](/docs/query-optimization).
+
+<CardGrid>
+  <Card
+    title="Using PostgreSQL from Go →"
+    href="/docs/sql-postgresql-basics/using-from-go"
+    description="pgx, query patterns, and avoiding SQL injection."
+  />
+</CardGrid>

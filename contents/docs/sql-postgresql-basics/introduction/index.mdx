@@ -1,0 +1,183 @@
+---
+title: Introduction & Setup
+description: What relational databases are, why PostgreSQL, and getting a server running locally with Docker and psql.
+keywords: ["postgresql", "relational database", "psql", "docker postgres", "sql basics"]
+---
+
+## What a relational database is
+
+A relational database stores data in **tables** — rows and columns, like a spreadsheet with rules. The "relational" part is that tables reference each other: an order row points at the user who placed it, rather than duplicating that user's details.
+
+Two things make this worth using over files or a key–value store:
+
+- **The database enforces correctness.** Types, required fields, uniqueness, and references between tables are all checked by the database itself. Bad data gets rejected regardless of which service or script tried to write it.
+- **You describe *what* you want, not *how* to get it.** SQL is declarative. You write "give me these rows joined with those, sorted by date"; the query planner figures out the fastest way to do it.
+
+## Why PostgreSQL
+
+It's the default choice for most backend teams:
+
+- **Open source**, no licensing cost, no vendor lock-in.
+- **Strict about correctness** — it won't silently truncate your data or coerce a bad value the way some databases will.
+- **Full ACID transactions** (covered in [Transactions](/docs/sql-postgresql-basics/transactions)).
+- **Far more than a plain table store** — JSONB, full-text search, geospatial data, and array columns are all built in, so you often don't need a second datastore.
+
+## Running PostgreSQL locally
+
+Docker is the fastest way, and it keeps your machine clean:
+
+<Tabs defaultValue="docker" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="docker">Docker</TabsTrigger>
+    <TabsTrigger value="compose">Docker Compose</TabsTrigger>
+    <TabsTrigger value="brew">Homebrew</TabsTrigger>
+  </TabsList>
+  <TabsContent value="docker">
+```bash showLineNumbers
+docker run --name pg -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=shop -p 5432:5432 -d postgres:17
+```
+  </TabsContent>
+  <TabsContent value="compose">
+```yaml showLineNumbers title="docker-compose.yml"
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: shop
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+  </TabsContent>
+  <TabsContent value="brew">
+```bash showLineNumbers
+brew install postgresql@17
+brew services start postgresql@17
+createdb shop
+```
+  </TabsContent>
+</Tabs>
+
+<Note title="Named volumes matter" type="warning">
+  The plain `docker run` above stores data inside the container — remove the container and your
+  data is gone. That's fine for scratch work, but use the Compose version with a named volume
+  (`pgdata`) for anything you want to keep between restarts.
+</Note>
+
+## Connecting with psql
+
+`psql` is PostgreSQL's interactive terminal. Learning a handful of its commands saves a lot of time:
+
+```bash showLineNumbers
+# Connect (into the Docker container)
+docker exec -it pg psql -U postgres -d shop
+
+# Or from your machine, using a connection URL
+psql "postgres://postgres:secret@localhost:5432/shop"
+```
+
+Once connected, backslash commands inspect the database:
+
+| Command | What it shows |
+|---|---|
+| `\l` | List all databases |
+| `\c dbname` | Connect to a different database |
+| `\dt` | List tables |
+| `\d users` | Describe the `users` table — columns, types, indexes, constraints |
+| `\di` | List indexes |
+| `\x` | Toggle expanded output (great for wide rows) |
+| `\timing` | Show how long each query takes |
+| `\?` | Help for backslash commands |
+| `\q` | Quit |
+
+<Note title="Connection strings" type="success">
+  The URL form `postgres://user:password@host:port/dbname` is what almost every library and tool
+  accepts, including Go's pgx. Store it in an environment variable — conventionally `DATABASE_URL` —
+  and never hardcode credentials in source. Add `?sslmode=require` for production connections.
+</Note>
+
+## The schema used throughout this section
+
+Every page from here uses this small e-commerce schema, so examples build on each other:
+
+```sql showLineNumbers title="schema.sql"
+CREATE TABLE users (
+    id         BIGSERIAL PRIMARY KEY,
+    email      TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE products (
+    id    BIGSERIAL PRIMARY KEY,
+    name  TEXT NOT NULL,
+    price_cents INTEGER NOT NULL CHECK (price_cents >= 0)
+);
+
+CREATE TABLE orders (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES users(id),
+    product_id BIGINT NOT NULL REFERENCES products(id),
+    quantity   INTEGER NOT NULL DEFAULT 1,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+<Mermaid chart="erDiagram
+  USERS ||--o{ ORDERS : places
+  PRODUCTS ||--o{ ORDERS : contains
+  USERS {
+    bigint id PK
+    text email UK
+    text name
+    timestamptz created_at
+  }
+  PRODUCTS {
+    bigint id PK
+    text name
+    int price_cents
+  }
+  ORDERS {
+    bigint id PK
+    bigint user_id FK
+    bigint product_id FK
+    int quantity
+    text status
+  }" />
+
+One user places many orders; each order refers to one product. Every part of that schema is explained over the next two pages.
+
+## SQL syntax conventions
+
+```sql showLineNumbers
+-- Two dashes start a comment
+
+-- Keywords are case-insensitive, but UPPERCASE for keywords and
+-- lowercase for identifiers is the near-universal convention:
+SELECT name FROM users WHERE id = 1;
+
+-- Statements end with a semicolon. In psql, nothing runs until you type one.
+```
+
+## Best practices
+
+- **Run PostgreSQL in Docker locally** and match the major version your production environment uses — behavior does change between versions.
+- **Learn `\d table_name`.** It answers most "what does this table look like?" questions instantly.
+- **Use `\timing`** while learning, so you develop a feel for which queries are slow.
+- **Keep credentials in environment variables**, never in code or committed files.
+- **Never experiment against production.** Have a local database you're free to break.
+
+<CardGrid>
+  <Card
+    title="Tables & Data Types →"
+    href="/docs/sql-postgresql-basics/tables-data-types"
+    description="CREATE TABLE and picking the right column types."
+  />
+</CardGrid>

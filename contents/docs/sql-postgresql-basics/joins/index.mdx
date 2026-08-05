@@ -1,0 +1,179 @@
+---
+title: Joins
+description: Combining rows across tables with INNER, LEFT, RIGHT, and FULL joins — plus the mistakes that produce wrong results.
+keywords: ["sql join", "inner join", "left join", "outer join", "cross join", "self join", "join condition"]
+---
+
+## What a join does
+
+A join combines rows from two tables based on a condition — usually matching a foreign key to a primary key. It's how you reassemble the data that normalization split apart.
+
+Using the schema from the [introduction](/docs/sql-postgresql-basics/introduction#the-schema-used-throughout-this-section):
+
+```sql showLineNumbers
+SELECT u.name, o.quantity, o.status
+FROM orders o
+JOIN users u ON o.user_id = u.id;
+```
+
+`o` and `u` are table aliases — they keep queries readable once more than one table is involved, and they're required when both tables have a column with the same name (like `id`).
+
+## INNER JOIN
+
+Returns only rows where the condition matches on **both** sides. `JOIN` alone means `INNER JOIN`.
+
+<Mermaid chart="graph TD
+  subgraph INNER
+  A[users] --- M((only matching rows))
+  B[orders] --- M
+  end" />
+
+```sql showLineNumbers
+SELECT u.name, p.name AS product, o.quantity
+FROM orders o
+INNER JOIN users u ON o.user_id = u.id
+INNER JOIN products p ON o.product_id = p.id
+WHERE o.status = 'paid';
+```
+
+Users with no orders don't appear. Orders with no matching user don't appear (and with a foreign key in place, can't exist).
+
+## LEFT JOIN
+
+Returns **every** row from the left table, plus matching rows from the right. Where there's no match, the right side's columns are `NULL`.
+
+This is what you want for "all X, with their Y if they have any":
+
+```sql showLineNumbers
+-- Every user, including those who have never ordered
+SELECT u.name, o.id AS order_id
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id;
+```
+
+| name | order_id |
+|---|---|
+| alice | 1 |
+| alice | 2 |
+| bob | *NULL* |
+
+### Finding rows with no match
+
+A LEFT JOIN plus `IS NULL` is the standard way to find "records without any related record":
+
+```sql showLineNumbers
+-- Users who have never placed an order
+SELECT u.id, u.name
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE o.id IS NULL;
+```
+
+## RIGHT and FULL
+
+```sql showLineNumbers
+-- RIGHT JOIN: all rows from the right table. Rare — just flip the tables
+-- and use LEFT JOIN, which is easier to read.
+SELECT u.name, o.id FROM users u RIGHT JOIN orders o ON o.user_id = u.id;
+
+-- FULL OUTER JOIN: all rows from both sides, NULLs where there's no match.
+SELECT u.name, o.id FROM users u FULL JOIN orders o ON o.user_id = u.id;
+```
+
+In practice you'll write `INNER` and `LEFT` joins almost exclusively.
+
+## CROSS JOIN
+
+Every row paired with every row — the Cartesian product. Occasionally useful for generating combinations, but usually a symptom of a mistake:
+
+```sql showLineNumbers
+SELECT * FROM users CROSS JOIN products;   -- 100 users × 50 products = 5,000 rows
+```
+
+<Note title="A missing join condition silently becomes a cross join" type="danger">
+  Forget the `ON` clause and you get every possible pairing — a query that returns millions of rows
+  and appears to hang:
+
+  ```sql
+  -- Wrong: no join condition
+  SELECT * FROM orders, users;
+
+  -- Right:
+  SELECT * FROM orders o JOIN users u ON o.user_id = u.id;
+  ```
+
+  Prefer explicit `JOIN ... ON` syntax over the old comma form precisely because it makes a missing
+  condition a syntax error rather than a silent disaster.
+</Note>
+
+## Self joins
+
+A table joined to itself, using two different aliases — for hierarchies and comparisons within one table:
+
+```sql showLineNumbers
+SELECT e.name AS employee, m.name AS manager
+FROM employees e
+LEFT JOIN employees m ON e.manager_id = m.id;
+```
+
+## WHERE vs ON in an outer join
+
+This distinction produces genuinely wrong results, and it's worth understanding properly:
+
+```sql showLineNumbers
+-- A: condition in ON — filters which rows are joined.
+-- Every user still appears; only 'paid' orders get attached.
+SELECT u.name, o.id
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'paid';
+
+-- B: condition in WHERE — filters AFTER the join.
+-- Users with no paid order have o.status = NULL, which fails the test,
+-- so they're dropped. This silently behaves like an INNER JOIN.
+SELECT u.name, o.id
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE o.status = 'paid';
+```
+
+<Note title="The rule" type="success">
+  In a `LEFT JOIN`, put conditions **on the right-hand table** in the `ON` clause. Putting them in
+  `WHERE` cancels out the "left" behavior. Conditions on the *left* table belong in `WHERE` as
+  normal.
+</Note>
+
+## Joins and duplicated rows
+
+A join to a one-to-many relationship multiplies rows on the left side:
+
+```sql showLineNumbers
+-- If alice has 3 orders, "alice" appears 3 times
+SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id;
+```
+
+This is correct behavior, but it means **counting after a join can double-count**:
+
+```sql showLineNumbers
+-- Wrong if a user has multiple orders — counts order rows, not users
+SELECT COUNT(*) FROM users u JOIN orders o ON o.user_id = u.id;
+
+-- Right
+SELECT COUNT(DISTINCT u.id) FROM users u JOIN orders o ON o.user_id = u.id;
+```
+
+## Best practices
+
+- **Always use explicit `JOIN ... ON`,** never the comma-separated form.
+- **Alias your tables** with short, meaningful names and qualify every column (`u.id`, not bare `id`).
+- **Index the columns you join on** — a foreign key column with no index makes joins slow ([Indexes](/docs/sql-postgresql-basics/indexes)).
+- **Put right-table conditions in `ON`** for outer joins.
+- **Watch for row multiplication** when joining one-to-many, especially before aggregating.
+- **Join only the tables you need.** Every extra join is more work for the planner and more chances to duplicate rows.
+
+<CardGrid>
+  <Card
+    title="Aggregation & Grouping →"
+    href="/docs/sql-postgresql-basics/aggregation"
+    description="COUNT, SUM, GROUP BY, and HAVING."
+  />
+</CardGrid>

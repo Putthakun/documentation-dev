@@ -1,0 +1,181 @@
+---
+title: Querying Data
+description: SELECT, WHERE, ORDER BY, LIMIT, operators, and the NULL rules that surprise everyone.
+keywords: ["select", "where", "order by", "limit", "offset", "null", "like", "distinct", "sql query"]
+---
+
+## SELECT
+
+```sql showLineNumbers
+SELECT id, name, email FROM users;
+
+SELECT * FROM users;              -- all columns
+
+SELECT name AS full_name FROM users;   -- rename output column
+```
+
+<Note title="Avoid SELECT * in application code" type="warning">
+  `SELECT *` is fine when exploring in `psql`, but in code it fetches columns you don't need, and
+  it breaks silently when someone adds or reorders a column. List the columns you actually want —
+  the query then documents exactly what your code depends on.
+</Note>
+
+## WHERE
+
+```sql showLineNumbers
+SELECT * FROM users WHERE id = 1;
+SELECT * FROM orders WHERE quantity > 5;
+SELECT * FROM orders WHERE status != 'cancelled';
+
+-- Combine with AND / OR, and use parentheses to be explicit
+SELECT * FROM orders
+WHERE status = 'paid'
+  AND (quantity > 10 OR created_at > now() - INTERVAL '7 days');
+```
+
+### Comparison operators
+
+| Operator | Meaning |
+|---|---|
+| `=` `!=` (or `<>`) | Equal, not equal |
+| `<` `>` `<=` `>=` | Ordering comparisons |
+| `BETWEEN a AND b` | Inclusive range |
+| `IN (...)` | Matches any value in a list |
+| `LIKE` / `ILIKE` | Pattern match (`ILIKE` is case-insensitive) |
+| `IS NULL` / `IS NOT NULL` | Null check |
+
+```sql showLineNumbers
+SELECT * FROM orders WHERE quantity BETWEEN 1 AND 10;
+SELECT * FROM orders WHERE status IN ('paid', 'shipped');
+SELECT * FROM users WHERE email LIKE '%@example.com';
+SELECT * FROM users WHERE name ILIKE 'ali%';       -- matches "Alice", "alice"
+```
+
+`LIKE` patterns use `%` for "any sequence of characters" and `_` for "exactly one character".
+
+<Note title="Leading wildcards can't use an index" type="warning">
+  `LIKE 'ali%'` can use a normal index. `LIKE '%ali%'` cannot — it scans every row, which gets slow
+  fast on a large table. For real text search, use PostgreSQL's full-text search or a trigram index
+  rather than `%...%`. Covered in [PostgreSQL Advanced](/docs/postgresql-advanced).
+</Note>
+
+## Working with NULL
+
+`NULL` means "unknown", not "empty" — and that has consequences that catch everyone at least once.
+
+```sql showLineNumbers
+-- These NEVER match, even for rows where the column IS null:
+SELECT * FROM users WHERE phone = NULL;    -- returns nothing
+SELECT * FROM users WHERE phone != NULL;   -- returns nothing
+
+-- Correct:
+SELECT * FROM users WHERE phone IS NULL;
+SELECT * FROM users WHERE phone IS NOT NULL;
+```
+
+Any comparison with `NULL` yields `NULL` (not true, not false), and `WHERE` only keeps rows where the condition is *true*.
+
+<Note title="NULL excludes rows from NOT IN and negations" type="danger">
+  This is the subtle one. If the subquery or list contains a `NULL`, `NOT IN` returns **no rows at
+  all**:
+
+  ```sql
+  -- If any user_id in orders is NULL, this returns nothing:
+  SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM orders);
+  ```
+
+  The same trap applies to `WHERE status != 'cancelled'`, which silently excludes rows where
+  `status` is `NULL`. Use `NOT EXISTS` instead of `NOT IN`, and be explicit when nulls should count:
+
+  ```sql
+  SELECT * FROM orders WHERE status != 'cancelled' OR status IS NULL;
+  ```
+
+  This is a strong argument for making columns `NOT NULL` wherever you can.
+</Note>
+
+`COALESCE` returns the first non-null argument — the standard way to supply a fallback:
+
+```sql showLineNumbers
+SELECT name, COALESCE(phone, 'not provided') AS phone FROM users;
+```
+
+## ORDER BY
+
+```sql showLineNumbers
+SELECT * FROM users ORDER BY created_at DESC;
+SELECT * FROM users ORDER BY name ASC;             -- ASC is the default
+SELECT * FROM orders ORDER BY status, created_at DESC;  -- multiple keys
+
+-- Control where nulls land
+SELECT * FROM users ORDER BY phone NULLS LAST;
+```
+
+## LIMIT and OFFSET
+
+```sql showLineNumbers
+SELECT * FROM users ORDER BY id LIMIT 10;             -- first 10
+SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 20;   -- page 3
+```
+
+<Note title="Always ORDER BY when using LIMIT" type="danger">
+  Without `ORDER BY`, PostgreSQL makes **no guarantee** about row order — so "the first 10" can
+  differ between runs, and paginating produces duplicates and gaps. `LIMIT` without `ORDER BY` is
+  almost always a bug.
+
+  Also note `OFFSET` gets slower as it grows: `OFFSET 100000` makes the database walk and discard
+  100,000 rows. For deep pagination, use keyset pagination instead:
+
+  ```sql
+  SELECT * FROM users WHERE id > $1 ORDER BY id LIMIT 10;
+  ```
+</Note>
+
+## DISTINCT
+
+```sql showLineNumbers
+SELECT DISTINCT status FROM orders;
+SELECT DISTINCT user_id, status FROM orders;   -- distinct combinations
+```
+
+## Logical order of evaluation
+
+SQL doesn't run in the order you write it. Knowing the real order explains a lot of otherwise confusing errors:
+
+<Mermaid chart="graph TD
+  F[FROM / JOIN] --> W[WHERE]
+  W --> G[GROUP BY]
+  G --> H[HAVING]
+  H --> S[SELECT]
+  S --> D[DISTINCT]
+  D --> O[ORDER BY]
+  O --> L[LIMIT / OFFSET]" />
+
+Because `SELECT` runs *after* `WHERE`, an alias defined in `SELECT` can't be used in `WHERE`:
+
+```sql showLineNumbers
+-- Error: column "full_name" does not exist
+SELECT name AS full_name FROM users WHERE full_name = 'alice';
+
+-- But ORDER BY runs after SELECT, so this works fine:
+SELECT name AS full_name FROM users ORDER BY full_name;
+```
+
+It also explains why `WHERE` can't filter on aggregates — that's what `HAVING` is for, covered in [Aggregation](/docs/sql-postgresql-basics/aggregation).
+
+## Best practices
+
+- **List columns explicitly** instead of `SELECT *` in application code.
+- **Always pair `LIMIT` with `ORDER BY`.**
+- **Use `IS NULL` / `IS NOT NULL`,** never `= NULL`.
+- **Prefer `NOT EXISTS` over `NOT IN`** when a subquery might produce nulls.
+- **Use keyset pagination** rather than large `OFFSET` values.
+- **Format multi-line queries** with keywords starting each line — you'll read these far more often than you write them.
+
+<CardGrid>
+  <Card
+    title="Joins →"
+    href="/docs/sql-postgresql-basics/joins"
+    description="Combining rows across tables."
+  />
+</CardGrid>

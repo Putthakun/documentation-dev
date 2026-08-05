@@ -1,0 +1,283 @@
+---
+title: Using PostgreSQL from Go
+description: Connecting with pgx, querying safely, handling no-rows, transactions, and preventing SQL injection.
+keywords: ["pgx", "golang postgres", "database/sql", "sql injection", "prepared statement", "connection pool", "ErrNoRows"]
+---
+
+## Choosing a driver
+
+| Option | When to use |
+|---|---|
+| **pgx** (`github.com/jackc/pgx/v5`) | The recommended default. PostgreSQL-native, fast, good type support |
+| `database/sql` + pgx stdlib | When you need the standard interface (e.g. for a library that expects `*sql.DB`) |
+| An ORM (GORM, ent) | When you want models and migrations generated; costs you control over the SQL |
+| sqlc | Generates type-safe Go from your SQL files — a popular middle ground |
+
+This page uses **pgx v5** directly. Writing SQL by hand keeps you in control of exactly what runs against the database, which matters more than it sounds when debugging performance.
+
+## Connecting
+
+Use a **pool**, not a single connection — it handles concurrency and reconnection for you:
+
+```go showLineNumbers title="db.go"
+package db
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
+func New(ctx context.Context) (*pgxpool.Pool, error) {
+    cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+    if err != nil {
+        return nil, fmt.Errorf("parsing DATABASE_URL: %w", err)
+    }
+
+    cfg.MaxConns = 10
+    cfg.MaxConnLifetime = time.Hour
+    cfg.MaxConnIdleTime = 30 * time.Minute
+
+    pool, err := pgxpool.NewWithConfig(ctx, cfg)
+    if err != nil {
+        return nil, fmt.Errorf("creating pool: %w", err)
+    }
+
+    if err := pool.Ping(ctx); err != nil {
+        return nil, fmt.Errorf("pinging database: %w", err)
+    }
+    return pool, nil
+}
+```
+
+Create the pool **once** at startup and pass it around — `pgxpool.Pool` is safe for concurrent use by many goroutines.
+
+<Note title="Sizing the pool" type="warning">
+  `MaxConns` too high is a real problem: PostgreSQL's default `max_connections` is 100, and each
+  connection costs memory on the server. If five instances of your service each open 50
+  connections, you exhaust the server. Start around 10–25 per instance and size it against your
+  actual PostgreSQL limit, not optimism.
+</Note>
+
+## Querying a single row
+
+```go showLineNumbers
+func GetUser(ctx context.Context, pool *pgxpool.Pool, id int64) (*User, error) {
+    var u User
+    err := pool.QueryRow(ctx,
+        `SELECT id, email, name, created_at FROM users WHERE id = $1`, id,
+    ).Scan(&u.ID, &u.Email, &u.Name, &u.CreatedAt)
+
+    if errors.Is(err, pgx.ErrNoRows) {
+        return nil, ErrUserNotFound          // your own sentinel error
+    }
+    if err != nil {
+        return nil, fmt.Errorf("querying user %d: %w", id, err)
+    }
+    return &u, nil
+}
+```
+
+<Note title="No rows is not a failure" type="success">
+  `pgx.ErrNoRows` (`sql.ErrNoRows` in `database/sql`) means the query ran fine and matched nothing.
+  That's usually a 404, not a 500. Always check it separately from real errors and translate it
+  into your own domain error — see [Errors: The Basics](/docs/golang-fundamentals/errors-basics).
+</Note>
+
+## Querying multiple rows
+
+```go showLineNumbers
+func ListOrders(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]Order, error) {
+    rows, err := pool.Query(ctx,
+        `SELECT id, user_id, product_id, quantity, status
+         FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, userID)
+    if err != nil {
+        return nil, fmt.Errorf("querying orders: %w", err)
+    }
+    defer rows.Close()
+
+    orders := make([]Order, 0)
+    for rows.Next() {
+        var o Order
+        if err := rows.Scan(&o.ID, &o.UserID, &o.ProductID, &o.Quantity, &o.Status); err != nil {
+            return nil, fmt.Errorf("scanning order: %w", err)
+        }
+        orders = append(orders, o)
+    }
+    if err := rows.Err(); err != nil {      // easy to forget, and important
+        return nil, fmt.Errorf("iterating orders: %w", err)
+    }
+    return orders, nil
+}
+```
+
+Three things that are easy to get wrong: `defer rows.Close()`, checking `rows.Err()` after the loop (iteration can fail partway), and initializing the slice with `make(...)` so an empty result marshals to `[]` rather than `null`.
+
+pgx v5 can collapse most of that boilerplate:
+
+```go showLineNumbers
+rows, err := pool.Query(ctx, `SELECT id, user_id, quantity FROM orders WHERE user_id = $1`, userID)
+if err != nil {
+    return nil, err
+}
+orders, err := pgx.CollectRows(rows, pgx.RowToStructByName[Order])
+```
+
+## SQL injection — always use placeholders
+
+<Note title="Never build SQL with string concatenation" type="danger">
+  ```go
+  // CATASTROPHIC — never do this
+  query := "SELECT * FROM users WHERE email = '" + email + "'"
+  ```
+
+  Given `email = "' OR '1'='1"`, that query returns every user. Worse inputs drop tables or exfiltrate
+  data. This is the most exploited web vulnerability in history and it is entirely preventable.
+
+  ```go
+  // Safe — the value is sent separately from the SQL and is never parsed as SQL
+  pool.QueryRow(ctx, `SELECT * FROM users WHERE email = $1`, email)
+  ```
+
+  Placeholders are not escaping — the query text and the parameters travel separately, so a
+  parameter can never change the meaning of the statement. Use `$1`, `$2`, … **always**, including
+  for values you believe are safe.
+</Note>
+
+Table and column names *can't* be parameterized. If they must be dynamic, validate against an allowlist:
+
+```go showLineNumbers
+var allowedSort = map[string]string{
+    "created": "created_at",
+    "name":    "name",
+}
+col, ok := allowedSort[userInput]
+if !ok {
+    return nil, fmt.Errorf("invalid sort field")
+}
+query := fmt.Sprintf(`SELECT id, name FROM users ORDER BY %s`, col)  // safe: col is from the map
+```
+
+## Writes and RETURNING
+
+```go showLineNumbers
+func CreateUser(ctx context.Context, pool *pgxpool.Pool, email, name string) (int64, error) {
+    var id int64
+    err := pool.QueryRow(ctx,
+        `INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id`,
+        email, name,
+    ).Scan(&id)
+    if err != nil {
+        return 0, fmt.Errorf("creating user: %w", err)
+    }
+    return id, nil
+}
+
+// When you don't need a value back, use Exec and check rows affected
+tag, err := pool.Exec(ctx, `UPDATE users SET name = $1 WHERE id = $2`, name, id)
+if err != nil {
+    return err
+}
+if tag.RowsAffected() == 0 {
+    return ErrUserNotFound
+}
+```
+
+### Handling constraint violations
+
+Let the database enforce uniqueness and handle the error, rather than checking first:
+
+```go showLineNumbers
+var pgErr *pgconn.PgError
+if errors.As(err, &pgErr) && pgErr.Code == "23505" {   // unique_violation
+    return ErrEmailTaken
+}
+```
+
+## Transactions in Go
+
+```go showLineNumbers
+func PlaceOrder(ctx context.Context, pool *pgxpool.Pool, userID, productID int64) error {
+    tx, err := pool.Begin(ctx)
+    if err != nil {
+        return fmt.Errorf("beginning transaction: %w", err)
+    }
+    defer tx.Rollback(ctx) //nolint:errcheck // no-op if the tx already committed
+
+    var stock int
+    err = tx.QueryRow(ctx,
+        `UPDATE products SET stock = stock - 1
+         WHERE id = $1 AND stock > 0 RETURNING stock`, productID).Scan(&stock)
+    if errors.Is(err, pgx.ErrNoRows) {
+        return ErrOutOfStock
+    }
+    if err != nil {
+        return fmt.Errorf("decrementing stock: %w", err)
+    }
+
+    _, err = tx.Exec(ctx,
+        `INSERT INTO orders (user_id, product_id) VALUES ($1, $2)`, userID, productID)
+    if err != nil {
+        return fmt.Errorf("inserting order: %w", err)
+    }
+
+    return tx.Commit(ctx)
+}
+```
+
+<Note title="Always defer Rollback" type="success">
+  `defer tx.Rollback(ctx)` immediately after `Begin` guarantees the transaction is released on
+  every path — including early returns and panics. Rolling back an already-committed transaction
+  returns `pgx.ErrTxClosed` and does nothing, so it's safe to always defer it.
+</Note>
+
+## Always pass context
+
+Every pgx call takes a `context.Context`. Pass the request's context so a cancelled or timed-out HTTP request also cancels the query, instead of leaving it running:
+
+```go showLineNumbers
+func handler(w http.ResponseWriter, r *http.Request) {
+    ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+    defer cancel()
+
+    user, err := GetUser(ctx, pool, id)
+    // ...
+}
+```
+
+## Bulk inserts
+
+```go showLineNumbers
+_, err := pool.CopyFrom(ctx,
+    pgx.Identifier{"orders"},
+    []string{"user_id", "product_id", "quantity"},
+    pgx.CopyFromSlice(len(orders), func(i int) ([]any, error) {
+        return []any{orders[i].UserID, orders[i].ProductID, orders[i].Quantity}, nil
+    }),
+)
+```
+
+`CopyFrom` uses PostgreSQL's `COPY` protocol and is dramatically faster than looping inserts for large batches.
+
+## Best practices
+
+- **One pool, created at startup**, shared across the app. Never open a connection per request.
+- **Always use `$1` placeholders.** No exceptions, no string concatenation.
+- **Pass `context.Context`** into every query.
+- **Check `pgx.ErrNoRows` separately** and map it to a domain error.
+- **`defer rows.Close()` and check `rows.Err()`** when iterating.
+- **`defer tx.Rollback(ctx)`** right after `Begin`.
+- **Keep transactions short** — no HTTP calls inside them ([Transactions](/docs/sql-postgresql-basics/transactions#keep-transactions-short)).
+- **Wrap errors with context** describing the operation.
+- **Store `DATABASE_URL` in the environment**, never in code.
+
+<CardGrid>
+  <Card
+    title="← Back to SQL / PostgreSQL Basics"
+    href="/docs/sql-postgresql-basics"
+    description="Jump to any topic in this section."
+  />
+</CardGrid>

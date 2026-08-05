@@ -21,6 +21,18 @@ export const Documents: Paths[] = [
   {
     title: 'SQL / PostgreSQL Basics',
     href: '/sql-postgresql-basics',
+    items: [
+      { title: 'Introduction & Setup', href: '/introduction' },
+      { title: 'Tables & Data Types', href: '/tables-data-types' },
+      { title: 'Constraints & Keys', href: '/constraints-keys' },
+      { title: 'Querying Data', href: '/querying' },
+      { title: 'Joins', href: '/joins' },
+      { title: 'Aggregation & Grouping', href: '/aggregation' },
+      { title: 'Modifying Data', href: '/modifying-data' },
+      { title: 'Transactions', href: '/transactions' },
+      { title: 'Indexes: The Basics', href: '/indexes' },
+      { title: 'Using PostgreSQL from Go', href: '/using-from-go' },
+    ],
   },
   {
     title: 'Golang Fundamentals',

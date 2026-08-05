@@ -1,0 +1,171 @@
+---
+title: Modifying Data
+description: INSERT, UPDATE, DELETE, upserts with ON CONFLICT, and PostgreSQL's RETURNING clause.
+keywords: ["insert", "update", "delete", "upsert", "on conflict", "returning", "truncate", "soft delete"]
+---
+
+## INSERT
+
+```sql showLineNumbers
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice');
+
+-- Multiple rows in one statement — much faster than one INSERT per row
+INSERT INTO users (email, name) VALUES
+    ('bob@example.com', 'Bob'),
+    ('carol@example.com', 'Carol');
+```
+
+Always list the column names. `INSERT INTO users VALUES (...)` depends on column order and breaks the moment someone adds a column.
+
+Columns you omit get their `DEFAULT` (or `NULL`), which is why `id` and `created_at` don't need to be supplied.
+
+### RETURNING
+
+A PostgreSQL feature worth knowing on day one: get values back from a write without a second query.
+
+```sql showLineNumbers
+INSERT INTO users (email, name)
+VALUES ('dave@example.com', 'Dave')
+RETURNING id, created_at;
+```
+
+This is how you obtain a generated `id` — no `SELECT` afterwards, no race condition, one round trip. It works on `UPDATE` and `DELETE` too.
+
+## UPDATE
+
+```sql showLineNumbers
+UPDATE users SET name = 'Alice Smith' WHERE id = 1;
+
+-- Multiple columns
+UPDATE orders
+SET status = 'shipped', updated_at = now()
+WHERE id = 42;
+
+-- Computed from the current value
+UPDATE orders SET quantity = quantity + 1 WHERE id = 42;
+```
+
+<Note title="UPDATE without WHERE rewrites every row" type="danger">
+  ```sql
+  UPDATE users SET name = 'test';   -- every user is now named 'test'
+  ```
+
+  There is no undo outside a transaction. Two habits that prevent this:
+
+  1. **Write the `WHERE` clause first,** then go back and add `SET`.
+  2. **`SELECT` before you `UPDATE`** — run the same `WHERE` as a `SELECT` to see exactly which
+     rows you're about to change.
+
+  In production, wrap destructive statements in an explicit transaction so you can check the row
+  count and `ROLLBACK` if it's wrong — see [Transactions](/docs/sql-postgresql-basics/transactions).
+</Note>
+
+### UPDATE from another table
+
+```sql showLineNumbers
+UPDATE orders o
+SET status = 'cancelled'
+FROM users u
+WHERE o.user_id = u.id AND u.is_active = false;
+```
+
+## DELETE
+
+```sql showLineNumbers
+DELETE FROM orders WHERE id = 42;
+DELETE FROM orders WHERE status = 'cancelled' AND created_at < now() - INTERVAL '1 year';
+
+DELETE FROM orders;        -- deletes every row. Same warning as UPDATE.
+```
+
+`TRUNCATE` empties a table far faster than `DELETE`, but it can't be filtered and is more disruptive:
+
+```sql showLineNumbers
+TRUNCATE orders;
+TRUNCATE orders RESTART IDENTITY CASCADE;   -- also resets the id sequence
+```
+
+Use `TRUNCATE` for resetting test data; use `DELETE` in application code.
+
+### Soft deletes
+
+Often you don't want data to actually disappear — for audit trails, recovery, or referential integrity:
+
+```sql showLineNumbers
+ALTER TABLE users ADD COLUMN deleted_at TIMESTAMPTZ;
+
+-- "Delete"
+UPDATE users SET deleted_at = now() WHERE id = 1;
+
+-- Every read must then exclude them
+SELECT * FROM users WHERE deleted_at IS NULL;
+```
+
+<Note title="Soft deletes are a real trade-off" type="warning">
+  They preserve history, but every single query must remember `WHERE deleted_at IS NULL` — and the
+  one that forgets shows deleted records to users. `UNIQUE` constraints also stop behaving as you'd
+  expect (a "deleted" email still blocks re-registration). Adopt soft deletes deliberately, not by
+  default, and consider a view that filters them automatically.
+</Note>
+
+## Upsert — INSERT ... ON CONFLICT
+
+"Insert, or update if it already exists." Doing this with a `SELECT` then `INSERT` is a race condition; `ON CONFLICT` is atomic and correct.
+
+```sql showLineNumbers
+-- Update the existing row on conflict
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice Updated')
+ON CONFLICT (email)
+DO UPDATE SET name = EXCLUDED.name
+RETURNING id;
+
+-- Or just ignore the conflict
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice')
+ON CONFLICT (email) DO NOTHING;
+```
+
+`EXCLUDED` refers to the row you *tried* to insert, so `EXCLUDED.name` is the new value. The conflict target (`email`) must have a `UNIQUE` constraint or index.
+
+<Mermaid chart="graph TD
+  I[INSERT row] --> C{Conflicts with<br/>a UNIQUE constraint?}
+  C -->|No| N[Row inserted]
+  C -->|Yes| D{ON CONFLICT action}
+  D -->|DO NOTHING| S[Skip silently]
+  D -->|DO UPDATE| U[Update existing row]" />
+
+## Bulk inserts
+
+Inserting rows one at a time in a loop is the single most common performance mistake with a new database. Each statement is a full network round trip:
+
+```sql showLineNumbers
+-- Slow: 1000 round trips
+INSERT INTO orders (user_id, product_id) VALUES (1, 1);
+INSERT INTO orders (user_id, product_id) VALUES (1, 2);
+-- ...
+
+-- Fast: one round trip
+INSERT INTO orders (user_id, product_id) VALUES (1, 1), (1, 2), (1, 3);
+```
+
+For very large loads (tens of thousands of rows), `COPY` is faster still, and pgx exposes it via `CopyFrom` — see [Using PostgreSQL from Go](/docs/sql-postgresql-basics/using-from-go).
+
+## Best practices
+
+- **Always name your columns in `INSERT`.**
+- **Write `WHERE` before `SET`** in an `UPDATE`, and `SELECT` first to confirm the target rows.
+- **Use `RETURNING`** to get generated IDs instead of a follow-up query.
+- **Use `ON CONFLICT` for upserts,** never check-then-insert.
+- **Batch your inserts** rather than looping single-row statements.
+- **Wrap multi-statement changes in a transaction** so they succeed or fail together.
+- **Add `updated_at TIMESTAMPTZ`** and set it on every update — you'll want it for debugging and syncing.
+
+<CardGrid>
+  <Card
+    title="Transactions →"
+    href="/docs/sql-postgresql-basics/transactions"
+    description="Making several statements succeed or fail as one unit."
+  />
+</CardGrid>

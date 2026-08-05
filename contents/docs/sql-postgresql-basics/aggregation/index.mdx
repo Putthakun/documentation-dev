@@ -1,0 +1,174 @@
+---
+title: Aggregation & Grouping
+description: COUNT, SUM, AVG, GROUP BY, and HAVING — computing summaries in the database instead of in application code.
+keywords: ["group by", "having", "count", "sum", "avg", "aggregate functions", "sql aggregation"]
+---
+
+## Aggregate functions
+
+An aggregate collapses many rows into a single value:
+
+```sql showLineNumbers
+SELECT COUNT(*) FROM orders;
+SELECT SUM(quantity) FROM orders;
+SELECT AVG(price_cents) FROM products;
+SELECT MIN(created_at), MAX(created_at) FROM orders;
+```
+
+| Function | Returns |
+|---|---|
+| `COUNT(*)` | Number of rows |
+| `COUNT(col)` | Number of rows where `col` is **not null** |
+| `COUNT(DISTINCT col)` | Number of distinct non-null values |
+| `SUM(col)` | Total |
+| `AVG(col)` | Mean |
+| `MIN` / `MAX` | Smallest / largest |
+
+<Note title="COUNT(*) and COUNT(column) are different" type="warning">
+  `COUNT(*)` counts rows. `COUNT(phone)` counts only rows where `phone` is not null. That's a
+  useful distinction — `COUNT(phone)` tells you how many users provided a phone number — but it's
+  a real source of bugs when you meant to count rows. When in doubt, use `COUNT(*)`.
+</Note>
+
+Aggregates ignore `NULL` generally, which also affects `AVG`:
+
+```sql showLineNumbers
+-- AVG divides by the count of NON-NULL values, not the row count.
+-- If you want nulls treated as zero, be explicit:
+SELECT AVG(COALESCE(score, 0)) FROM reviews;
+```
+
+## GROUP BY
+
+`GROUP BY` splits rows into groups and applies the aggregate to each group separately:
+
+```sql showLineNumbers
+-- One row per status, with the count for each
+SELECT status, COUNT(*) AS order_count
+FROM orders
+GROUP BY status;
+```
+
+| status | order_count |
+|---|---|
+| pending | 12 |
+| paid | 45 |
+| shipped | 30 |
+
+<Mermaid chart="graph TD
+  R[All order rows] --> G{GROUP BY status}
+  G --> P[pending rows] --> PC[COUNT = 12]
+  G --> A[paid rows] --> AC[COUNT = 45]
+  G --> S[shipped rows] --> SC[COUNT = 30]" />
+
+### The GROUP BY rule
+
+Every column in `SELECT` must either be **in the `GROUP BY`** or **wrapped in an aggregate**. PostgreSQL enforces this strictly:
+
+```sql showLineNumbers
+-- Error: column "o.id" must appear in the GROUP BY clause
+-- or be used in an aggregate function
+SELECT status, id, COUNT(*) FROM orders GROUP BY status;
+
+-- Fine
+SELECT status, COUNT(*), MAX(id) FROM orders GROUP BY status;
+```
+
+The reason is simple: if 45 rows share a status, which single `id` would the database show you? Either pick one with an aggregate (`MAX(id)`) or group by it too.
+
+### Grouping by multiple columns
+
+```sql showLineNumbers
+SELECT user_id, status, COUNT(*) AS n
+FROM orders
+GROUP BY user_id, status
+ORDER BY user_id, status;
+```
+
+One row per distinct combination.
+
+### Grouping with joins
+
+The common real-world shape — a summary per user:
+
+```sql showLineNumbers
+SELECT u.id, u.name, COUNT(o.id) AS order_count, SUM(o.quantity) AS total_items
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+GROUP BY u.id, u.name
+ORDER BY order_count DESC;
+```
+
+<Note title="Use LEFT JOIN and COUNT(column) for zero-counts" type="success">
+  Two details make this query correct for users with no orders:
+
+  - **`LEFT JOIN`** keeps users who have no matching orders (an inner join would drop them).
+  - **`COUNT(o.id)`, not `COUNT(*)`** — after a left join with no match, `o.id` is `NULL`, so
+    `COUNT(o.id)` correctly gives `0`, while `COUNT(*)` would count the single null-padded row and
+    give `1`.
+</Note>
+
+## HAVING
+
+`WHERE` filters rows *before* grouping; `HAVING` filters groups *after*. Aggregates can only be used in `HAVING`:
+
+```sql showLineNumbers
+-- Users with more than 5 orders
+SELECT user_id, COUNT(*) AS order_count
+FROM orders
+GROUP BY user_id
+HAVING COUNT(*) > 5;
+
+-- Error: aggregates are not allowed in WHERE
+SELECT user_id, COUNT(*) FROM orders WHERE COUNT(*) > 5 GROUP BY user_id;
+```
+
+Both together — filter rows first, then filter the resulting groups:
+
+```sql showLineNumbers
+SELECT user_id, COUNT(*) AS paid_orders, SUM(quantity) AS items
+FROM orders
+WHERE status = 'paid'              -- discard non-paid rows first
+GROUP BY user_id
+HAVING SUM(quantity) > 10          -- then keep only big-volume users
+ORDER BY items DESC
+LIMIT 10;
+```
+
+<Note title="Filter in WHERE when you can" type="success">
+  `WHERE` runs before grouping, so it reduces how many rows have to be grouped at all — cheaper
+  than grouping everything and discarding groups afterward. Only conditions that genuinely depend
+  on an aggregate belong in `HAVING`.
+</Note>
+
+## Aggregate with FILTER
+
+A PostgreSQL feature that's cleaner than the `CASE WHEN` trick for conditional counts:
+
+```sql showLineNumbers
+SELECT
+    COUNT(*) AS total,
+    COUNT(*) FILTER (WHERE status = 'paid')      AS paid,
+    COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled
+FROM orders;
+```
+
+One pass over the table, several different counts.
+
+## Best practices
+
+- **Aggregate in the database, not in Go.** Pulling 100,000 rows over the network to count them in application code is slow and wastes memory — `COUNT(*)` returns one number.
+- **Use `COUNT(column)` after a `LEFT JOIN`** when zero should mean zero.
+- **Put non-aggregate filters in `WHERE`, aggregate filters in `HAVING`.**
+- **Group by the primary key** (`GROUP BY u.id, u.name`) rather than by a non-unique column like name — two different users can share a name.
+- **Beware row multiplication** — joining one-to-many before summing inflates totals. Aggregate in a subquery first if you're joining to several one-to-many tables at once.
+
+Window functions (running totals, rankings, per-group top-N) are the natural next step and are covered in [PostgreSQL Advanced](/docs/postgresql-advanced).
+
+<CardGrid>
+  <Card
+    title="Modifying Data →"
+    href="/docs/sql-postgresql-basics/modifying-data"
+    description="INSERT, UPDATE, DELETE, upserts, and RETURNING."
+  />
+</CardGrid>

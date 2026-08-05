@@ -1,15 +1,66 @@
 ---
 title: SQL / PostgreSQL Basics
-description: Core SQL and PostgreSQL concepts every backend engineer needs.
+description: Core SQL and PostgreSQL concepts every backend engineer needs — tables, queries, joins, transactions, and indexes.
+keywords: ["sql", "postgresql", "postgres", "database", "basics"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
-</Note>
+SQL is the language you use to talk to a relational database, and PostgreSQL is the database most backend teams reach for: open source, extremely reliable, and packed with features that let you push work down into the database instead of doing it in application code.
 
-## What to expect here
+This section covers the SQL you'll write daily and the PostgreSQL specifics worth knowing early. Deeper topics — query plans, JSONB, window functions, schema evolution — live in [PostgreSQL Advanced](/docs/postgresql-advanced), [Query Optimization](/docs/query-optimization), and [Migration Strategies](/docs/migration-strategies).
 
-- What SQL and relational databases are, and how PostgreSQL fits in
-- `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and basic `JOIN`s
-- Data types, constraints, and primary/foreign keys
-- Connecting to PostgreSQL from the CLI (`psql`) and from Go
+Every example uses the same small schema — users, orders, and products — so the queries build on each other as you read.
+
+## What you'll find here
+
+<CardGrid>
+  <Card
+    title="Introduction & Setup"
+    href="/docs/sql-postgresql-basics/introduction"
+    description="Relational databases, PostgreSQL, and getting a server running."
+  />
+  <Card
+    title="Tables & Data Types"
+    href="/docs/sql-postgresql-basics/tables-data-types"
+    description="CREATE TABLE and picking the right column types."
+  />
+  <Card
+    title="Constraints & Keys"
+    href="/docs/sql-postgresql-basics/constraints-keys"
+    description="Primary keys, foreign keys, and letting the database enforce correctness."
+  />
+  <Card
+    title="Querying Data"
+    href="/docs/sql-postgresql-basics/querying"
+    description="SELECT, WHERE, ORDER BY, LIMIT — and how NULL behaves."
+  />
+  <Card
+    title="Joins"
+    href="/docs/sql-postgresql-basics/joins"
+    description="Combining rows across tables — INNER, LEFT, and friends."
+  />
+  <Card
+    title="Aggregation & Grouping"
+    href="/docs/sql-postgresql-basics/aggregation"
+    description="COUNT, SUM, GROUP BY, and HAVING."
+  />
+  <Card
+    title="Modifying Data"
+    href="/docs/sql-postgresql-basics/modifying-data"
+    description="INSERT, UPDATE, DELETE, upserts, and RETURNING."
+  />
+  <Card
+    title="Transactions"
+    href="/docs/sql-postgresql-basics/transactions"
+    description="ACID, BEGIN/COMMIT/ROLLBACK, and why they matter."
+  />
+  <Card
+    title="Indexes: The Basics"
+    href="/docs/sql-postgresql-basics/indexes"
+    description="What an index is, when to add one, and what it costs."
+  />
+  <Card
+    title="Using PostgreSQL from Go"
+    href="/docs/sql-postgresql-basics/using-from-go"
+    description="pgx, query patterns, and avoiding SQL injection."
+  />
+</CardGrid>
