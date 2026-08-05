@@ -1,0 +1,200 @@
+---
+title: Interfaces
+description: Go's implicit interfaces, why small interfaces win, type assertions and switches, and the typed-nil trap.
+keywords: ["golang interface", "implicit satisfaction", "type assertion", "type switch", "any", "typed nil"]
+---
+
+## What an interface is
+
+An interface is a set of method signatures. Any type that has those methods satisfies the interface — **automatically**, with no declaration:
+
+```go showLineNumbers
+type Shape interface {
+    Area() float64
+    Perimeter() float64
+}
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64      { return r.Width * r.Height }
+func (r Rectangle) Perimeter() float64 { return 2 * (r.Width + r.Height) }
+
+// Rectangle now satisfies Shape. No "implements" keyword anywhere.
+var s Shape = Rectangle{Width: 3, Height: 4}
+```
+
+<Mermaid chart="graph BT
+  R[Rectangle<br/>Area, Perimeter] --> S[Shape interface<br/>Area, Perimeter]
+  C[Circle<br/>Area, Perimeter] --> S
+  T[Triangle<br/>Area, Perimeter] --> S" />
+
+This is **implicit satisfaction**, and it's the key difference from Java or C#. The consequence is important: you can define an interface that existing types — including types from libraries you don't control — already satisfy.
+
+## Interfaces belong to the consumer
+
+Because satisfaction is implicit, the idiomatic place to define an interface is the package that *uses* it, not the package that implements it:
+
+```go showLineNumbers title="service/user.go"
+// The service declares only what it needs.
+type UserStore interface {
+    GetUser(ctx context.Context, id string) (*User, error)
+}
+
+type UserService struct {
+    store UserStore   // any type with GetUser works
+}
+
+func (s *UserService) Profile(ctx context.Context, id string) (*User, error) {
+    return s.store.GetUser(ctx, id)
+}
+```
+
+Your Postgres implementation doesn't need to know this interface exists. In tests you pass a fake with the same method — no mocking framework required. This is why Go codebases test easily.
+
+## Keep interfaces small
+
+The standard library sets the tone — the most-used interfaces in Go have exactly one method:
+
+```go showLineNumbers
+type Stringer interface { String() string }
+type Reader   interface { Read(p []byte) (n int, err error) }
+type Writer   interface { Write(p []byte) (n int, err error) }
+type error    interface { Error() string }
+```
+
+<Note title="The bigger the interface, the weaker the abstraction" type="success">
+  A Go proverb, and good advice. A one-method interface is satisfied by almost anything and is
+  trivial to fake in tests. A ten-method interface forces every implementation — and every test
+  double — to provide all ten. Define the smallest interface that covers what you actually call.
+</Note>
+
+Implementing `Stringer` is a cheap win — `fmt` uses it automatically:
+
+```go showLineNumbers
+func (u User) String() string {
+    return fmt.Sprintf("User(%s, %s)", u.ID, u.Name)
+}
+
+fmt.Println(user)  // calls String() for you
+```
+
+## The empty interface: any
+
+`interface{}` (aliased as `any` since Go 1.18) has no methods, so **every** type satisfies it:
+
+```go showLineNumbers
+var x any
+x = 42
+x = "hello"
+x = User{}
+```
+
+You lose all type information, so you need a type assertion to get it back. Use `any` sparingly — mostly for JSON of unknown shape or genuinely generic containers. Generics are usually the better answer now.
+
+## Type assertions
+
+Extract the concrete value from an interface. **Always use the two-value form** — the single-value form panics on failure:
+
+```go showLineNumbers
+var i any = "hello"
+
+s, ok := i.(string)   // safe: s="hello", ok=true
+if !ok {
+    // not a string
+}
+
+n, ok := i.(int)      // safe: n=0, ok=false
+
+s := i.(string)       // panics if i is not a string — avoid
+```
+
+## Type switches
+
+The clean way to branch on several possible types:
+
+```go showLineNumbers
+func describe(i any) string {
+    switch v := i.(type) {
+    case nil:
+        return "nil"
+    case int:
+        return fmt.Sprintf("int: %d", v)
+    case string:
+        return fmt.Sprintf("string of length %d", len(v))
+    case []int:
+        return fmt.Sprintf("int slice with %d items", len(v))
+    case error:
+        return "error: " + v.Error()
+    default:
+        return fmt.Sprintf("unknown type %T", v)
+    }
+}
+```
+
+Inside each case, `v` has that case's concrete type.
+
+## The typed-nil trap
+
+This is the interface bug that catches experienced Go developers, not just beginners:
+
+```go showLineNumbers
+type MyError struct{ msg string }
+func (e *MyError) Error() string { return e.msg }
+
+func doWork() error {
+    var err *MyError = nil   // a nil POINTER
+    return err               // returned as an interface
+}
+
+if doWork() != nil {
+    fmt.Println("this branch RUNS")  // surprising!
+}
+```
+
+An interface value holds **two** things: a type and a value. Here the type is `*MyError` and the value is `nil` — so the interface itself is not nil, because its type field is set.
+
+<Note title="How to avoid it" type="danger">
+  Never declare a typed error variable and return it directly. Return a literal `nil`, or only
+  assign to the `error` variable when there's a real error:
+
+  ```go
+  func doWork() error {
+      if somethingFailed {
+          return &MyError{msg: "failed"}
+      }
+      return nil   // untyped nil — the interface is truly nil
+  }
+  ```
+</Note>
+
+## Accept interfaces, return structs
+
+A widely followed Go guideline:
+
+```go showLineNumbers
+// Accept an interface — callers can pass a file, buffer, network conn, or test fake
+func Process(r io.Reader) error
+
+// Return a concrete type — callers get the full API and can decide
+// what interface to treat it as
+func NewClient(url string) *Client
+```
+
+Returning an interface hides capability from the caller and makes the API harder to extend without breaking people.
+
+## Best practices
+
+- **Define interfaces where they're consumed,** not next to the implementation.
+- **Keep them to 1–3 methods.** Split large interfaces.
+- **Always use the two-value type assertion** to avoid panics.
+- **Return `nil` literally**, never a typed nil pointer, from functions returning `error`.
+- **Don't create an interface until you have a second implementation** (or a test that needs a fake). Premature interfaces are a common Go code smell.
+- **Use `any` rarely.** Prefer concrete types or generics.
+
+<CardGrid>
+  <Card
+    title="Packages & Modules →"
+    href="/docs/golang-fundamentals/packages-modules"
+    description="go.mod, imports, and what capitalization means."
+  />
+</CardGrid>

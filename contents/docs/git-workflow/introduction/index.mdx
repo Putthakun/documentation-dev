@@ -1,0 +1,64 @@
+---
+title: Introduction to Version Control
+description: Why version control exists, and Git's core mental model — working directory, staging area, and repository.
+keywords: ["git", "version control", "vcs", "working directory", "staging area", "repository"]
+---
+
+## What is version control?
+
+Version control is a system that records changes to files over time, so you can recall specific versions later. Without it, "backup" usually means files named `final.go`, `final_v2.go`, `final_v2_ACTUALLY_FINAL.go` — which breaks down the moment more than one person touches the code.
+
+A version control system (VCS) gives you:
+
+- **History** — every change, who made it, and why (via commit messages).
+- **Branching** — the ability to work on a new feature or fix without touching working code.
+- **Collaboration** — multiple people editing the same codebase without overwriting each other.
+- **Safety** — the ability to undo a bad change and recover previous states.
+
+**Git** is a *distributed* VCS: every developer has a full copy of the repository's history on their own machine, not just a snapshot from a central server. This is why most Git operations (commit, log, diff, branch) work instantly and offline — only `push`/`pull`/`fetch` need the network.
+
+<Note title="Git vs GitHub" type="success">
+  Git is the version control tool itself (runs on your machine). GitHub (or GitLab, Bitbucket) is a
+  hosting service for Git repositories, adding pull requests, issue tracking, and CI/CD on top. You
+  can use Git without ever touching GitHub.
+</Note>
+
+## Git's three-area mental model
+
+Understanding Git means understanding three areas a file passes through:
+
+1. **Working Directory** — the actual files on disk that you edit.
+2. **Staging Area (Index)** — a draft of your next commit. You choose exactly which changes go in.
+3. **Repository (`.git` directory)** — the permanent, committed history.
+
+<Mermaid chart="graph LR
+  A[Working Directory] -->|git add| B[Staging Area]
+  B -->|git commit| C[Repository / .git]
+  C -->|git checkout| A" />
+
+This staging step is what makes Git different from simpler VCS tools: you don't commit "everything that changed," you commit *exactly what you `git add`ed* — which is what enables small, focused, atomic commits (more on that in [Git Basics](/docs/git-workflow/basics)).
+
+## A file's lifecycle
+
+Every file in a Git repository is in one of these states:
+
+| State | Meaning |
+|---|---|
+| **Untracked** | Git doesn't know about this file yet (new file, never `git add`ed). |
+| **Unmodified / Tracked** | Committed, and unchanged since the last commit. |
+| **Modified** | Tracked, and changed since the last commit — but not staged. |
+| **Staged** | Modified, and marked (via `git add`) to go into the next commit. |
+
+`git status` (covered next) tells you exactly which state every file is in — it's the single most-used command in this entire guide.
+
+## Why this matters for you
+
+As a first-jobber, most of the pain with Git doesn't come from not knowing commands — it comes from not knowing *which area* a change currently lives in. "I committed but my teammate doesn't see it" (it's in your local repo, not pushed). "I `git add`ed but it's not in my commit" (you edited the file again after staging it — the working directory changed again). Keeping this three-area model in your head resolves 90% of Git confusion before it starts.
+
+<CardGrid>
+  <Card
+    title="Git Basics →"
+    href="/docs/git-workflow/basics"
+    description="Put the model into practice: init, add, commit, status, log."
+  />
+</CardGrid>

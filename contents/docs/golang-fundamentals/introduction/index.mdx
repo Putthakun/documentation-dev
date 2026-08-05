@@ -1,0 +1,128 @@
+---
+title: Introduction & Setup
+description: Why backends use Go, how to install it, and the toolchain commands you'll run every day.
+keywords: ["golang", "install go", "go mod init", "go run", "go build", "gofmt", "go vet"]
+---
+
+## Why Go for backend work
+
+Go was built at Google to solve a specific problem: large codebases with many engineers were becoming slow to compile and hard to keep consistent. The design choices follow from that:
+
+- **Compiles to a single static binary.** No runtime, no interpreter, no dependency hell on the server. Deploying is copying one file — which is also why Go containers can be tiny.
+- **Fast compilation.** Builds take seconds, so the edit → run loop stays tight.
+- **Concurrency built into the language.** Goroutines and channels make handling thousands of simultaneous requests natural (covered later in [Concurrency](/docs/concurrency)).
+- **Deliberately small.** No inheritance, no generics until recently, one loop keyword. Less to argue about in code review.
+- **One official formatter.** `gofmt` ends all formatting debates — every Go codebase looks the same.
+
+The trade-off is verbosity: Go makes you write out error handling explicitly and avoids clever abstractions. That feels tedious at first and pays off when you're reading unfamiliar code at 2am.
+
+## Installing Go
+
+<Tabs defaultValue="mac" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="mac">macOS</TabsTrigger>
+    <TabsTrigger value="linux">Linux</TabsTrigger>
+    <TabsTrigger value="check">Verify</TabsTrigger>
+  </TabsList>
+  <TabsContent value="mac">
+```bash showLineNumbers
+brew install go
+```
+  </TabsContent>
+  <TabsContent value="linux">
+```bash showLineNumbers
+# Download the latest tarball from https://go.dev/dl/ then:
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin   # add this to ~/.bashrc or ~/.zshrc
+```
+  </TabsContent>
+  <TabsContent value="check">
+```bash showLineNumbers
+go version
+go env GOPATH
+```
+  </TabsContent>
+</Tabs>
+
+## Your first program
+
+Every Go project starts by initializing a module. The module path is normally the repository URL — it's how other code imports your packages.
+
+<Step>
+  <StepItem title="Create the module">
+    ```bash
+    mkdir hello && cd hello
+    go mod init github.com/yourname/hello
+    ```
+
+    This creates a `go.mod` file that tracks your module path, Go version, and dependencies.
+  </StepItem>
+
+  <StepItem title="Write main.go">
+    ```go showLineNumbers title="main.go"
+    package main
+
+    import "fmt"
+
+    func main() {
+        fmt.Println("Hello, backend!")
+    }
+    ```
+
+    `package main` plus a `func main()` marks this as an executable program rather than a library.
+  </StepItem>
+
+  <StepItem title="Run it">
+    ```bash
+    go run .
+    ```
+  </StepItem>
+</Step>
+
+## The toolchain
+
+These ship with Go — no extra tools to install:
+
+| Command | What it does |
+|---|---|
+| `go run .` | Compile and run in one step. Used constantly during development. |
+| `go build` | Compile to a binary in the current directory. |
+| `go build -o bin/app ./cmd/api` | Compile a specific package to a named output path. |
+| `go test ./...` | Run all tests in the module (`./...` means "this package and everything below"). |
+| `go fmt ./...` | Reformat code to the canonical style. |
+| `go vet ./...` | Report suspicious constructs the compiler allows but are probably bugs. |
+| `go mod tidy` | Add missing dependencies and drop unused ones from `go.mod`. |
+| `go get example.com/pkg` | Add or upgrade a dependency. |
+
+## Cross-compiling
+
+One of Go's most useful production tricks — build a Linux binary from your Mac:
+
+```bash showLineNumbers
+GOOS=linux GOARCH=amd64 go build -o bin/app ./cmd/api
+```
+
+No cross-compiler toolchain needed. This is why Go plays so well with Docker and CI pipelines.
+
+## Best practices
+
+- **Run `go fmt` on save.** Configure your editor to do it automatically — never hand-format Go.
+- **Run `go vet ./...` before committing.** It catches real bugs (bad `printf` verbs, unreachable code, lock copying) that compile fine.
+- **Use the repo URL as your module path,** even for private projects. Changing it later means updating every import.
+- **Commit `go.mod` and `go.sum`.** `go.sum` contains checksums that guarantee everyone builds the exact same dependency code.
+- **Run `go mod tidy` after adding or removing imports** to keep dependencies honest.
+
+<Note title="Where to look things up" type="success">
+  The standard library documentation at [pkg.go.dev](https://pkg.go.dev/std) is genuinely good and
+  worth reading directly. Go's standard library covers HTTP servers, JSON, SQL, crypto, and testing
+  out of the box — reach for it before adding a dependency.
+</Note>
+
+<CardGrid>
+  <Card
+    title="Variables, Types & Constants →"
+    href="/docs/golang-fundamentals/variables-types"
+    description="Declarations, zero values, conversions, and iota."
+  />
+</CardGrid>

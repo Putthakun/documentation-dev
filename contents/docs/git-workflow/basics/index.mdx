@@ -1,0 +1,118 @@
+---
+title: Git Basics
+description: The everyday Git commands — init, clone, add, commit, status, log, diff — and how to write good commit messages.
+keywords: ["git init", "git clone", "git add", "git commit", "git status", "git log", "git diff", "conventional commits"]
+---
+
+These are the commands you'll type dozens of times a day. Get comfortable with them before moving on to branching.
+
+## Starting a repository
+
+<Tabs defaultValue="new" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="new">New project</TabsTrigger>
+    <TabsTrigger value="existing">Existing project</TabsTrigger>
+  </TabsList>
+  <TabsContent value="new">
+```bash showLineNumbers
+mkdir my-project && cd my-project
+git init
+```
+  </TabsContent>
+  <TabsContent value="existing">
+```bash showLineNumbers
+git clone https://github.com/org/repo.git
+cd repo
+```
+  </TabsContent>
+</Tabs>
+
+`git init` creates a `.git` folder in the current directory — that folder *is* the repository. `git clone` does the same thing, but also downloads all history from a remote and points it at that remote automatically (see [Working with Remotes](/docs/git-workflow/remotes)).
+
+## Checking status
+
+```bash showLineNumbers
+git status
+```
+
+Run this constantly. It tells you which files are untracked, modified, or staged — i.e., exactly where you are in the [three-area model](/docs/git-workflow/introduction#gits-three-area-mental-model).
+
+## Staging changes
+
+```bash showLineNumbers
+git add file.go          # stage one file
+git add file1.go file2.go # stage multiple files
+git add .                 # stage everything in the current directory
+git add -p                # interactively stage parts of a file (hunks)
+```
+
+<Note title="Best practice" type="success">
+  Prefer `git add -p` over `git add .` when a file has multiple unrelated changes. It lets you split
+  them into separate, focused commits instead of one commit that does three things at once.
+</Note>
+
+## Committing
+
+```bash showLineNumbers
+git commit -m "Add rate limiting to auth endpoint"
+```
+
+A commit is a permanent snapshot of the staged changes, with a message explaining *why*. Useful flags:
+
+```bash showLineNumbers
+git commit -am "message"   # stage all tracked, modified files AND commit (skips new/untracked files)
+git commit --amend         # rewrite the most recent commit (message and/or staged changes)
+```
+
+<Note title="Danger" type="danger">
+  Never `--amend` a commit that has already been pushed and might be used by someone else — it
+  rewrites history and will break their local branch. Only amend commits that are still local.
+</Note>
+
+### Writing good commit messages
+
+A widely used convention is **Conventional Commits**: `<type>: <short summary>`.
+
+```bash showLineNumbers
+git commit -m "feat: add JWT refresh token endpoint"
+git commit -m "fix: prevent nil pointer on empty request body"
+git commit -m "docs: update README with setup instructions"
+git commit -m "refactor: extract validation logic into helper"
+git commit -m "test: add table-driven tests for parser"
+git commit -m "chore: bump go.mod dependencies"
+```
+
+Common types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`. This convention is what makes tools like automated changelogs and semantic-version bumping possible — and it's simply easier for a human to scan `git log` when every message starts with intent.
+
+## Viewing history
+
+```bash showLineNumbers
+git log                    # full history
+git log --oneline          # one line per commit
+git log --oneline --graph  # with branch/merge visualization
+git log -p                 # show the actual diff for each commit
+git log --author="Alice"   # filter by author
+```
+
+## Viewing changes (diff)
+
+```bash showLineNumbers
+git diff              # unstaged changes vs last commit
+git diff --staged     # staged changes vs last commit
+git diff HEAD~1 HEAD   # changes between two commits
+```
+
+## Best practices
+
+- **Commit often, in small units.** A commit should represent one logical change — easy to review, easy to revert if it's wrong.
+- **Write the "why," not the "what."** The diff already shows *what* changed; the message should explain *why* (context a diff can't capture).
+- **Never commit secrets.** `.env` files, API keys, credentials — see [.gitignore & Git Hooks](/docs/git-workflow/gitignore-hooks) for how to prevent this before it happens.
+- **Run `git status` before `git add`,** and `git diff --staged` before `git commit` — know exactly what you're about to commit.
+
+<CardGrid>
+  <Card
+    title="Branching & Merging →"
+    href="/docs/git-workflow/branching-merging"
+    description="Isolate work using branches, then bring it back together."
+  />
+</CardGrid>

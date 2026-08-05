@@ -1,0 +1,197 @@
+---
+title: "Errors: The Basics"
+description: Why Go returns errors instead of throwing them, the if err != nil idiom, and when panic is appropriate.
+keywords: ["golang error", "if err != nil", "errors.New", "fmt.Errorf", "panic", "recover"]
+---
+
+## Errors are values
+
+Go has no exceptions. A function that can fail returns an `error` as its last return value, and the caller checks it. That's the whole model.
+
+```go showLineNumbers
+f, err := os.Open("config.yaml")
+if err != nil {
+    return err
+}
+defer f.Close()
+```
+
+`error` is just an interface with one method:
+
+```go showLineNumbers
+type error interface {
+    Error() string
+}
+```
+
+Anything with an `Error() string` method is an error. `nil` means success.
+
+<Note title="Why no exceptions?" type="success">
+  Because errors are ordinary values, they're visible in the function signature, impossible to
+  ignore accidentally, and there's no invisible control flow jumping up the stack. The cost is
+  verbosity — you will write `if err != nil` a lot. That trade is deliberate: reading Go code, you
+  can always see exactly what happens when something fails.
+</Note>
+
+## Creating errors
+
+```go showLineNumbers
+// Simple, static message
+errors.New("user not found")
+
+// With formatting
+fmt.Errorf("invalid port %d", port)
+
+// Wrapping another error with %w — preserves the original for inspection
+fmt.Errorf("loading config: %w", err)
+```
+
+Use `%w` (not `%v`) when including an underlying error, so callers can still inspect it with `errors.Is` / `errors.As`.
+
+## The idiom
+
+Check immediately, handle, and return early:
+
+```go showLineNumbers
+func LoadUser(ctx context.Context, id string) (*User, error) {
+    row, err := db.QueryRow(ctx, "SELECT ...", id)
+    if err != nil {
+        return nil, fmt.Errorf("querying user %s: %w", id, err)
+    }
+
+    u, err := scanUser(row)
+    if err != nil {
+        return nil, fmt.Errorf("scanning user %s: %w", id, err)
+    }
+
+    return u, nil
+}
+```
+
+This produces the shape all Go code has: a column of short `if err != nil` blocks with the happy path running straight down the left margin.
+
+### Add context as it travels up
+
+Each layer wraps with what *it* was doing. The final message reads like a trace:
+
+```text
+handling POST /users: creating user: querying user u_123: connection refused
+```
+
+Without wrapping, you'd get `connection refused` and no idea where it came from.
+
+<Note title="Don't log and return" type="warning">
+  Pick one. If you log the error *and* return it, the caller logs it too, and you get the same
+  failure recorded three times at three layers. Convention: **return** errors with added context all
+  the way up, and **log once** at the top (the HTTP handler, or `main`).
+</Note>
+
+## Never ignore errors silently
+
+```go showLineNumbers
+// Bad — the error vanishes
+result, _ := doSomething()
+
+// Fine — deliberate, with a reason
+// Close() on a read-only file can't fail in a way we can act on.
+defer f.Close()
+
+// Good
+result, err := doSomething()
+if err != nil {
+    return fmt.Errorf("doing something: %w", err)
+}
+```
+
+If you genuinely intend to discard an error, write a comment saying why. Linters like `errcheck` will otherwise flag it — correctly.
+
+## Sentinel errors
+
+A package-level error value callers can compare against:
+
+```go showLineNumbers
+var ErrNotFound = errors.New("not found")
+
+func GetUser(id string) (*User, error) {
+    if !exists(id) {
+        return nil, ErrNotFound
+    }
+    // ...
+}
+
+// Caller:
+u, err := GetUser(id)
+if errors.Is(err, ErrNotFound) {
+    w.WriteHeader(http.StatusNotFound)
+    return
+}
+```
+
+`errors.Is` unwraps `%w` chains, so it still matches after the error has been wrapped several layers up. The standard library uses this pattern: `sql.ErrNoRows`, `io.EOF`, `os.ErrNotExist`.
+
+## panic and recover
+
+`panic` unwinds the stack and crashes the program. It is **not** Go's exception mechanism, and you should almost never call it.
+
+```go showLineNumbers
+panic("this kills the program")
+```
+
+Legitimate uses are narrow:
+
+- **Truly unrecoverable startup failures** — a missing required env var in `main()`, a malformed embedded template. Crashing loudly at boot is correct.
+- **Programmer errors that should be impossible** — `regexp.MustCompile` panics because a hardcoded bad regex is a bug, not a runtime condition.
+
+```go showLineNumbers
+// Fine: fails at startup if the developer wrote a bad pattern
+var emailRe = regexp.MustCompile(`^[^@]+@[^@]+$`)
+
+func main() {
+    dsn := os.Getenv("DATABASE_URL")
+    if dsn == "" {
+        log.Fatal("DATABASE_URL is required")   // log.Fatal, not panic
+    }
+}
+```
+
+`recover` stops a panic, and is only used at a boundary you don't want a single bad request to take down — most commonly HTTP middleware:
+
+```go showLineNumbers title="middleware.go"
+func recoverPanic(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        defer func() {
+            if err := recover(); err != nil {
+                log.Printf("panic: %v\n%s", err, debug.Stack())
+                http.Error(w, "internal server error", http.StatusInternalServerError)
+            }
+        }()
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+<Note title="panic is not error handling" type="danger">
+  Don't use `panic` for expected failures — a missing user, invalid input, a timeout. Those are
+  ordinary conditions and belong in a returned `error`. A panic in request-handling code will take
+  down the whole server unless something recovers it.
+</Note>
+
+## Best practices
+
+- **Check every error.** Discard one only deliberately, with a comment.
+- **Wrap with `%w` and add context** describing what you were attempting.
+- **Return errors up; log once at the top.**
+- **Use `errors.Is` for comparison**, never `err == ErrFoo` (that breaks once anything wraps it).
+- **Don't put "error" or "failed" in the message** — `fmt.Errorf("error opening file: %w", err)` reads as "error: error opening file: ...". Just say what you were doing: `"opening config: %w"`.
+- **Lowercase, no trailing punctuation** in error strings, since they get concatenated into longer messages.
+- **Reserve `panic` for impossible states**; use `log.Fatal` for startup failures.
+
+Custom error types, `errors.As`, structured error handling in HTTP APIs, and richer patterns are covered in [Error Handling](/docs/error-handling).
+
+<CardGrid>
+  <Card
+    title="← Back to Golang Fundamentals"
+    href="/docs/golang-fundamentals"
+    description="Jump to any topic in this section."
+  />
+</CardGrid>

@@ -1,0 +1,97 @@
+---
+title: Branching & Merging
+description: Isolating work in branches, and bringing it back into main with git merge.
+keywords: ["git branch", "git checkout", "git switch", "git merge", "fast-forward", "feature branch"]
+---
+
+## Why branch?
+
+A branch is just a movable pointer to a commit. Branching lets you work on a feature or fix in isolation, without touching the stable code on `main`, and without your half-finished work affecting teammates.
+
+## Creating and switching branches
+
+```bash showLineNumbers
+git branch feature/rate-limiting     # create a branch (doesn't switch to it)
+git switch feature/rate-limiting     # switch to it
+# or, in one step:
+git switch -c feature/rate-limiting  # create AND switch
+
+git branch                           # list local branches
+git branch -a                        # list local + remote branches
+```
+
+<Note title="checkout vs switch" type="success">
+  `git checkout <branch>` is the older, do-everything command (also used for restoring files). `git
+  switch` and `git restore` were added later to split that overloaded behavior into two clear
+  commands. Prefer `git switch` for changing branches — it's harder to misuse.
+</Note>
+
+## The branching model
+
+```bash showLineNumbers
+git switch -c feature/rate-limiting
+# ... make changes, commit ...
+git add .
+git commit -m "feat: add token bucket rate limiter"
+```
+
+<Mermaid chart="gitGraph
+  commit id: 'init'
+  commit id: 'setup auth'
+  branch feature/rate-limiting
+  checkout feature/rate-limiting
+  commit id: 'add limiter'
+  commit id: 'add tests'
+  checkout main
+  commit id: 'fix typo'
+  merge feature/rate-limiting" />
+
+Your branch diverges from `main` at the point you created it. You commit freely on your branch while `main` may keep moving (other people merging their own work) — Git tracks both histories independently until you merge.
+
+## Merging
+
+Once your feature branch is ready, merge it back into `main`:
+
+```bash showLineNumbers
+git switch main
+git pull                       # make sure main is up to date first
+git merge feature/rate-limiting
+```
+
+Two possible outcomes:
+
+- **Fast-forward merge** — if `main` hasn't moved since you branched, Git just moves the `main` pointer forward. No merge commit is created.
+- **Three-way merge** — if `main` *has* moved (someone else merged first), Git creates a new **merge commit** with two parents, combining both histories.
+
+```bash showLineNumbers
+git merge --no-ff feature/rate-limiting   # force a merge commit even if fast-forward is possible
+```
+
+<Note title="Best practice" type="success">
+  Many teams use `--no-ff` for feature branches on purpose — it keeps a visible record in `git log
+  --graph` of *when* a feature was merged, even if the commits themselves are linear. This is a
+  preference, not a rule; small solo projects often don't need it.
+</Note>
+
+## Deleting a branch after merge
+
+```bash showLineNumbers
+git branch -d feature/rate-limiting     # safe delete (refuses if not merged)
+git branch -D feature/rate-limiting     # force delete (even if not merged)
+git push origin --delete feature/rate-limiting  # delete on the remote too
+```
+
+## Best practices
+
+- **Branch names should say what they do:** `feature/rate-limiting`, `fix/nil-pointer-auth`, `chore/upgrade-deps` — not `test`, `new-branch`, `asdf`.
+- **Keep branches short-lived.** The longer a branch lives without merging, the more it diverges from `main` and the more painful the eventual merge/conflict resolution becomes.
+- **Pull `main` before you branch, and again before you merge**, so you're working from the latest code.
+- **Delete branches after merging.** A repo with 200 stale branches is a repo nobody trusts.
+
+<CardGrid>
+  <Card
+    title="Rebase vs Merge →"
+    href="/docs/git-workflow/rebase-vs-merge"
+    description="A second way to combine histories — and when to prefer it."
+  />
+</CardGrid>

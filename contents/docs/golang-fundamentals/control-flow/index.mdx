@@ -1,0 +1,222 @@
+---
+title: Control Flow
+description: if, for, switch, and defer — Go's deliberately small set of control structures.
+keywords: ["golang if", "golang for loop", "range", "switch", "defer", "control flow"]
+---
+
+Go has exactly three control structures: `if`, `for`, and `switch`. No `while`, no `do-while`, no ternary operator. Plus `defer`, which has no equivalent in most languages.
+
+## if
+
+No parentheses around the condition, braces always required:
+
+```go showLineNumbers
+if count > 10 {
+    return errors.New("too many items")
+}
+
+if err != nil {
+    return err
+} else if count == 0 {
+    return nil
+}
+```
+
+### Statement-scoped variables
+
+`if` can run a short statement before the condition. The variable it declares is scoped to the `if`/`else` block only — this is extremely common in Go for error handling:
+
+```go showLineNumbers
+if err := db.Ping(); err != nil {
+    return fmt.Errorf("database unreachable: %w", err)
+}
+// err does not exist out here
+
+if user, err := findUser(id); err == nil {
+    fmt.Println(user.Name)
+}
+```
+
+<Note title="Best practice" type="success">
+  Scope variables as tightly as you can. `if err := doThing(); err != nil` keeps `err` from leaking
+  into the rest of the function, which prevents accidentally checking a stale error later.
+</Note>
+
+## for — the only loop
+
+Every loop in Go is a `for`. It just has four shapes:
+
+```go showLineNumbers
+// 1. Classic three-part loop
+for i := 0; i < 10; i++ {
+    fmt.Println(i)
+}
+
+// 2. Condition only — this is Go's "while"
+for count < 100 {
+    count *= 2
+}
+
+// 3. Infinite — used for servers, workers, retry loops
+for {
+    conn, err := listener.Accept()
+    if err != nil {
+        continue
+    }
+    go handle(conn)
+}
+
+// 4. range — iterate a slice, map, string, or channel
+for i, item := range items {
+    fmt.Println(i, item)
+}
+```
+
+### range details
+
+```go showLineNumbers
+// Index only
+for i := range items { }
+
+// Value only — discard the index with _
+for _, item := range items { }
+
+// Maps yield key, value — in RANDOM order every run
+for key, value := range m { }
+
+// Strings yield byte index and rune (not byte!) — handles UTF-8 correctly
+for i, r := range "héllo" {
+    fmt.Printf("%d: %c\n", i, r)
+}
+
+// Integers (Go 1.22+) — iterate 0..n-1
+for i := range 10 { }
+```
+
+<Note title="range copies the value" type="warning">
+  `for _, item := range items` gives you a **copy** of each element. Mutating `item` does not change
+  the slice. To modify in place, index directly: `items[i].Field = x`. This trips up almost every
+  Go beginner at least once.
+</Note>
+
+### break and continue
+
+```go showLineNumbers
+// Labels let you break out of nested loops — rare, but occasionally needed
+outer:
+for _, row := range grid {
+    for _, cell := range row {
+        if cell == target {
+            break outer
+        }
+    }
+}
+```
+
+## switch
+
+Go's `switch` does **not** fall through by default — no `break` needed at the end of each case.
+
+```go showLineNumbers
+switch status {
+case StatusActive:
+    return "running"
+case StatusPending, StatusQueued:  // multiple values in one case
+    return "waiting"
+default:
+    return "unknown"
+}
+```
+
+### switch with no condition
+
+A conditionless `switch` is a clean replacement for a long `if/else if` chain:
+
+```go showLineNumbers
+switch {
+case score >= 90:
+    grade = "A"
+case score >= 80:
+    grade = "B"
+case score >= 70:
+    grade = "C"
+default:
+    grade = "F"
+}
+```
+
+`switch` also has a statement-scoped form (`switch x := f(); x {`) and a type-switch form for interfaces, covered in [Interfaces](/docs/golang-fundamentals/interfaces).
+
+## defer
+
+`defer` schedules a function call to run when the surrounding **function** returns — no matter how it returns, including on a panic. It's how Go does cleanup.
+
+```go showLineNumbers
+func readConfig(path string) ([]byte, error) {
+    f, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer f.Close()   // runs on every return path below
+
+    // ... many early returns ...
+    return io.ReadAll(f)
+}
+```
+
+Putting `defer f.Close()` immediately after a successful open means you can never forget to close it, no matter how many `return` statements you add later.
+
+### Deferred calls run LIFO
+
+<Mermaid chart="graph TD
+  A[defer A] --> B[defer B]
+  B --> C[defer C]
+  C --> R[function returns]
+  R --> C2[C runs first]
+  C2 --> B2[then B]
+  B2 --> A2[then A]" />
+
+```go showLineNumbers
+func example() {
+    defer fmt.Println("first")
+    defer fmt.Println("second")
+    defer fmt.Println("third")
+}
+// Output: third, second, first
+```
+
+### Arguments are evaluated immediately
+
+This is the classic `defer` gotcha:
+
+```go showLineNumbers
+i := 0
+defer fmt.Println(i)  // prints 0 — i's value was captured HERE
+i = 99
+// ... function returns, prints 0, not 99
+
+// Use a closure if you want the value at return time:
+defer func() { fmt.Println(i) }()  // prints 99
+```
+
+<Note title="defer inside a loop" type="danger">
+  `defer` fires at **function** exit, not loop-iteration exit. Opening files in a loop with
+  `defer f.Close()` holds every file open until the whole function finishes — and will exhaust file
+  descriptors on a large loop. Extract the body into its own function, or call `Close()` explicitly.
+</Note>
+
+## Best practices
+
+- **Handle errors early and return.** Guard clauses over nesting — Go code should read top-to-bottom with the happy path at the leftmost indentation.
+- **`defer` cleanup immediately after acquiring the resource** (file, lock, transaction, connection) so it can't be forgotten.
+- **Use a conditionless `switch`** instead of long `if/else if` chains.
+- **Watch out for the `range` copy** when you intend to mutate elements.
+- **Avoid `goto` and labeled breaks** unless the alternative is genuinely worse.
+
+<CardGrid>
+  <Card
+    title="Functions →"
+    href="/docs/golang-fundamentals/functions"
+    description="Multiple returns, variadics, and closures."
+  />
+</CardGrid>

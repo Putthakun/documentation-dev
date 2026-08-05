@@ -1,0 +1,94 @@
+---
+title: Git Workflow Strategies
+description: Feature Branch Workflow, Git Flow, and Trunk-Based Development compared — and which to pick for a small team.
+keywords: ["feature branch workflow", "git flow", "trunk-based development", "branching strategy"]
+---
+
+Everything so far (branching, merging, rebasing) are *mechanics*. A **workflow strategy** is the *policy* a team agrees on for how those mechanics get used — when to branch, how long a branch lives, and how code reaches production.
+
+## Feature Branch Workflow
+
+The simplest and most common strategy: every change (feature, fix, chore) gets its own branch off `main`, and merges back via a pull request once reviewed.
+
+<Mermaid chart="gitGraph
+  commit id: 'init'
+  branch feature/login
+  checkout feature/login
+  commit id: 'add login form'
+  commit id: 'add validation'
+  checkout main
+  merge feature/login
+  branch fix/typo
+  checkout fix/typo
+  commit id: 'fix typo'
+  checkout main
+  merge fix/typo" />
+
+- **Pros:** simple, easy to explain, works with any hosting platform's PR review flow.
+- **Cons:** on its own, says nothing about *releases* — fine for a website deployed continuously, less clear for versioned software with scheduled releases.
+
+## Git Flow
+
+A heavier model with dedicated long-lived branches for different purposes:
+
+- `main` — always reflects the latest **released** production code.
+- `develop` — integration branch where features land before a release.
+- `feature/*` — branched from `develop`, merged back into `develop`.
+- `release/*` — branched from `develop` when preparing a release (final testing/bugfixes).
+- `hotfix/*` — branched from `main` for urgent production fixes, merged into both `main` and `develop`.
+
+<Mermaid chart="graph TD
+  M[main] --> H[hotfix/*]
+  H --> M
+  H --> D[develop]
+  D --> F[feature/*]
+  F --> D
+  D --> R[release/*]
+  R --> M
+  R --> D" />
+
+- **Pros:** very explicit about what's released vs in-progress; good for software with scheduled, versioned releases (e.g. mobile apps, installed software).
+- **Cons:** heavy process overhead for teams that deploy continuously; overkill for small teams or single-developer projects.
+
+## Trunk-Based Development
+
+The opposite extreme: everyone commits directly to `main` (the "trunk"), or uses very short-lived branches (hours, not weeks) that merge back constantly. Feature flags hide incomplete work in production rather than isolating it in a branch.
+
+<Mermaid chart="gitGraph
+  commit id: 'A'
+  commit id: 'B'
+  branch feature/x
+  commit id: 'small change'
+  checkout main
+  merge feature/x
+  commit id: 'C'
+  commit id: 'D'" />
+
+- **Pros:** avoids large, painful merges entirely; pairs naturally with continuous deployment and CI/CD.
+- **Cons:** requires strong test coverage and CI discipline — without it, `main` breaks often.
+
+## Comparison
+
+| | Feature Branch | Git Flow | Trunk-Based |
+|---|---|---|---|
+| Branch lifetime | Days | Days–weeks | Hours |
+| Best for | Most small/medium teams | Versioned releases (mobile, packaged software) | Continuous deployment, high test coverage |
+| Complexity | Low | High | Low (but requires discipline/CI) |
+| Release model | Deploy `main` whenever ready | Scheduled releases via `release/*` | Deploy `main` continuously |
+
+## Recommendation for a small or solo project
+
+<Note title="Recommendation" type="success">
+  Start with **Feature Branch Workflow**: branch off `main` for every change, open a PR (even
+  solo — it's a good habit and gives you a review checkpoint), merge, delete the branch. It's the
+  least process for the most benefit. Reach for Git Flow only if you ship versioned releases on a
+  schedule; reach for Trunk-Based only once you have solid CI/test coverage to protect `main`.
+</Note>
+
+<CardGrid>
+  <Card
+    title=".gitignore & Git Hooks →"
+    href="/docs/git-workflow/gitignore-hooks"
+    description="Keep build artifacts and secrets out of your repo, and automate checks before commits."
+  />
+</CardGrid>

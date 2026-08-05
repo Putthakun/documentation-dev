@@ -1,0 +1,199 @@
+---
+title: Functions
+description: Multiple return values, named returns, variadic parameters, functions as values, and closures.
+keywords: ["golang functions", "multiple return values", "variadic", "closure", "named returns"]
+---
+
+## Basic syntax
+
+Types come after the name — the opposite of C-family languages:
+
+```go showLineNumbers
+func add(a int, b int) int {
+    return a + b
+}
+
+// Consecutive params of the same type can share it:
+func add(a, b int) int {
+    return a + b
+}
+
+// No return value:
+func log(msg string) {
+    fmt.Println(msg)
+}
+```
+
+## Multiple return values
+
+This is one of Go's defining features, and it's why Go doesn't need exceptions. The convention is `(result, error)`:
+
+```go showLineNumbers
+func divide(a, b float64) (float64, error) {
+    if b == 0 {
+        return 0, errors.New("division by zero")
+    }
+    return a / b, nil
+}
+
+result, err := divide(10, 2)
+if err != nil {
+    return err
+}
+
+// Discard a value you don't need:
+result, _ := divide(10, 2)
+```
+
+<Note title="Error is always last" type="success">
+  By convention, `error` is the final return value, and you check it immediately. Returning
+  `(value, error)` and ignoring the error with `_` is almost always a bug waiting to happen — `go
+  vet` and linters will flag it in most cases.
+</Note>
+
+The "comma ok" idiom is the same shape, used for lookups that may not find anything:
+
+```go showLineNumbers
+value, ok := myMap["key"]
+if !ok {
+    // key was not present
+}
+```
+
+## Named return values
+
+You can name the return values. They're pre-declared as zero-valued variables, and a bare `return` returns their current values:
+
+```go showLineNumbers
+func split(sum int) (x, y int) {
+    x = sum * 4 / 9
+    y = sum - x
+    return   // naked return — returns x and y
+}
+```
+
+<Note title="Use named returns sparingly" type="warning">
+  Naked returns hurt readability in anything longer than a few lines — the reader has to scroll back
+  to find what's being returned. The one place named returns genuinely earn their keep is modifying
+  the error in a deferred function:
+
+  ```go
+  func doWork() (err error) {
+      defer func() {
+          if r := recover(); r != nil {
+              err = fmt.Errorf("recovered: %v", r)
+          }
+      }()
+      // ...
+  }
+  ```
+
+  Even then, prefer explicit `return x, y` over a naked `return`.
+</Note>
+
+## Variadic parameters
+
+`...T` accepts any number of arguments, received as a slice:
+
+```go showLineNumbers
+func sum(nums ...int) int {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return total
+}
+
+sum(1, 2, 3)      // 6
+sum()             // 0 — nums is an empty slice
+ 
+// Spread an existing slice with ...
+values := []int{1, 2, 3}
+sum(values...)
+```
+
+A variadic parameter must be last. This is how `fmt.Println` and `append` work.
+
+## Functions are values
+
+Functions are first-class: assign them to variables, pass them as arguments, return them.
+
+```go showLineNumbers
+// As a variable
+var op func(int, int) int
+op = add
+fmt.Println(op(2, 3))
+
+// As a parameter — this is how sorting works
+sort.Slice(users, func(i, j int) bool {
+    return users[i].Age < users[j].Age
+})
+
+// A named function type makes signatures readable
+type HandlerFunc func(w http.ResponseWriter, r *http.Request)
+```
+
+## Closures
+
+A closure is a function that captures variables from the scope it was defined in. The captured variable is shared, not copied:
+
+```go showLineNumbers
+func counter() func() int {
+    count := 0
+    return func() int {
+        count++      // captures and mutates the outer count
+        return count
+    }
+}
+
+next := counter()
+fmt.Println(next()) // 1
+fmt.Println(next()) // 2
+fmt.Println(next()) // 3
+```
+
+The most common real-world use is middleware — a function that wraps a handler and returns a new one:
+
+```go showLineNumbers title="middleware.go"
+func withLogging(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        next(w, r)
+        log.Printf("%s %s took %v", r.Method, r.URL.Path, time.Since(start))
+    }
+}
+
+http.HandleFunc("/users", withLogging(handleUsers))
+```
+
+<Note title="The loop variable capture bug" type="danger">
+  In **Go 1.21 and earlier**, `for` loop variables were reused across iterations, so closures created
+  in a loop all captured the *same* variable and saw its final value:
+
+  ```go
+  for _, v := range items {
+      go func() { fmt.Println(v) }()  // pre-1.22: often prints the last item repeatedly
+  }
+  ```
+
+  **Go 1.22 changed this** — loop variables are now per-iteration, and this code behaves as expected.
+  If you work in an older codebase (or see the old fix `v := v` at the top of a loop body), this is
+  what it was for. Check your `go` directive in `go.mod`: the new behavior applies when it says
+  `go 1.22` or later.
+</Note>
+
+## Best practices
+
+- **Return `(value, error)` and check the error immediately.** Don't defer error handling.
+- **Keep functions short and single-purpose.** If you need a comment to explain a section, that section probably wants to be its own function.
+- **Accept interfaces, return concrete types** — a widely followed Go guideline that keeps functions flexible for callers. More on this in [Interfaces](/docs/golang-fundamentals/interfaces).
+- **Avoid naked returns** outside very short functions.
+- **Pass `context.Context` as the first parameter** for anything that does I/O, so callers can cancel it: `func FetchUser(ctx context.Context, id string) (*User, error)`.
+
+<CardGrid>
+  <Card
+    title="Arrays, Slices & Maps →"
+    href="/docs/golang-fundamentals/collections"
+    description="Go's collections — and the slice gotcha that bites everyone."
+  />
+</CardGrid>

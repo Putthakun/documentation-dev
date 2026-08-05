@@ -1,0 +1,81 @@
+---
+title: Working with Remotes
+description: Connecting to a remote repository — remote, fetch, pull, push, and tracking branches.
+keywords: ["git remote", "git fetch", "git pull", "git push", "tracking branch", "origin"]
+---
+
+## What is a remote?
+
+A remote is a pointer to another copy of the repository — usually hosted on GitHub, GitLab, or similar. By convention, the remote you cloned from is named `origin`.
+
+```bash showLineNumbers
+git remote -v                                  # list remotes and their URLs
+git remote add origin https://github.com/org/repo.git   # add a remote (if you started with git init)
+```
+
+## fetch vs pull
+
+This distinction trips up a lot of beginners:
+
+```bash showLineNumbers
+git fetch origin    # download new commits/branches from the remote, but do NOT merge them
+git pull origin main # fetch AND merge (or rebase, if configured) into your current branch
+```
+
+<Mermaid chart="graph TD
+  R[Remote: origin/main] -->|git fetch| L1[Local: origin/main updated]
+  L1 -->|git merge| L2[Local: main updated]
+  R -->|git pull = fetch + merge| L2" />
+
+`git fetch` is always safe — it just updates your local knowledge of the remote (`origin/main`) without touching your working files. `git pull` immediately integrates those changes into your current branch, which can trigger a merge or a conflict right away.
+
+<Note title="Best practice" type="success">
+  When in doubt, `git fetch` first and inspect what changed (`git log origin/main`) before pulling.
+  This is especially useful before a rebase, or when you're not sure what teammates have pushed.
+</Note>
+
+## Pushing your work
+
+```bash showLineNumbers
+git push origin feature/rate-limiting          # push a branch for the first time
+git push -u origin feature/rate-limiting        # same, but also set upstream tracking
+git push                                        # once tracking is set, just this works
+```
+
+The `-u` (`--set-upstream`) flag links your local branch to a remote branch, so future `git push`/`git pull` on that branch don't need the full `origin <branch>` every time — and `git status` will tell you if you're ahead/behind the remote.
+
+## Tracking branches
+
+```bash showLineNumbers
+git status                 # shows "Your branch is ahead of 'origin/main' by 2 commits"
+git branch -vv              # shows every local branch and what it tracks
+```
+
+## Force pushing
+
+```bash showLineNumbers
+git push --force              # dangerous: overwrites remote history
+git push --force-with-lease   # safer: fails if the remote has commits you haven't seen
+```
+
+<Note title="Danger" type="danger">
+  Only force-push to a branch that is yours alone (typically after a rebase). Force-pushing to a
+  shared branch like `main` can silently delete teammates' commits. Prefer `--force-with-lease` —
+  it refuses to push if someone else has pushed to that branch since you last fetched, protecting
+  you from accidentally clobbering their work.
+</Note>
+
+## Best practices
+
+- **Pull before you push.** If the remote has moved, push will simply be rejected — fetch/pull (or rebase) first.
+- **Push early, push often** on your own feature branches — it's a free backup and lets teammates see your work-in-progress.
+- **Never force-push to `main` or any shared branch.**
+- **Set up a tracking branch (`-u`)** the first time you push a new branch, so subsequent commands are simpler.
+
+<CardGrid>
+  <Card
+    title="Resolving Merge Conflicts →"
+    href="/docs/git-workflow/resolving-conflicts"
+    description="What to do when git pull or git merge can't auto-combine changes."
+  />
+</CardGrid>

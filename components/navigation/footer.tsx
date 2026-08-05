@@ -1,4 +1,3 @@
-import Image from 'next/image'
 import Link from 'next/link'
 
 import { Settings } from '@/types/settings'
@@ -18,27 +17,6 @@ export function Footer() {
         </Link>
         .
       </p>
-      {Settings.branding !== false && (
-        <div className="hidden items-center md:block">
-          <Link
-            aria-label="Rubix Studios"
-            className="font-semibold"
-            href="https://rubixstudios.com.au"
-            target="_blank"
-            title="Rubix Studios"
-          >
-            <Image
-              alt="Rubix Studios logo"
-              aria-label="Rubix Studios logo"
-              height={30}
-              priority={false}
-              src="/logo.svg"
-              title="Rubix Studios logo"
-              width={30}
-            />
-          </Link>
-        </div>
-      )}
     </footer>
   )
 }

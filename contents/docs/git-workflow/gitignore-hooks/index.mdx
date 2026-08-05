@@ -1,0 +1,109 @@
+---
+title: .gitignore & Git Hooks
+description: Keeping build artifacts and secrets out of your repository, and automating checks before commits with Git hooks.
+keywords: ["gitignore", "git hooks", "pre-commit", "husky"]
+---
+
+## `.gitignore`
+
+A `.gitignore` file tells Git which files/patterns to never track — build output, dependencies, local secrets, IDE settings. It lives at the repo root (nested `.gitignore` files are also allowed for folder-specific rules).
+
+```bash showLineNumbers title=".gitignore (Go project example)"
+# Binaries
+/bin/
+*.exe
+*.test
+
+# Dependency directories
+/vendor/
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+```
+
+<Note title="It only prevents future tracking" type="warning">
+  `.gitignore` only stops Git from tracking **new** matches. If a file is already committed, adding
+  it to `.gitignore` won't remove it from history. Untrack it explicitly:
+
+  ```bash
+  git rm --cached .env
+  git commit -m "chore: stop tracking .env"
+  ```
+</Note>
+
+### Checking what's ignored
+
+```bash showLineNumbers
+git check-ignore -v path/to/file   # confirms which rule is ignoring a file (useful for debugging)
+git status --ignored                # lists ignored files too
+```
+
+## Git Hooks
+
+Hooks are scripts Git runs automatically at points in the workflow (before a commit, before a push, after a merge, etc.). They live in `.git/hooks/` as plain shell scripts, but that folder isn't committed to the repo by default — which is why most teams use a tool to manage and share hooks.
+
+### A raw hook example
+
+```bash showLineNumbers title=".git/hooks/pre-commit"
+#!/bin/sh
+# Run tests before allowing a commit
+go test ./... || {
+  echo "Tests failed — commit aborted."
+  exit 1
+}
+```
+
+Make it executable: `chmod +x .git/hooks/pre-commit`. Now `git commit` will run this first, and abort the commit if tests fail.
+
+### Common hook points
+
+| Hook | Runs when | Typical use |
+|---|---|---|
+| `pre-commit` | Before a commit is created | Lint, format, run fast tests |
+| `commit-msg` | After the commit message is written | Enforce message format (e.g. Conventional Commits) |
+| `pre-push` | Before `git push` | Run the full test suite, block push on failure |
+| `post-merge` | After a merge completes | Auto-install dependencies if `go.mod` changed |
+
+### Sharing hooks across a team
+
+Because `.git/hooks/` isn't committed, teams typically use a tool like **[Husky](https://typicode.github.io/husky/)** (Node projects) or **[pre-commit](https://pre-commit.com/)** (language-agnostic, popular in Go/Python projects) to define hooks in a versioned config file and install them automatically for every contributor.
+
+```bash showLineNumbers title="pre-commit example (.pre-commit-config.yaml)"
+repos:
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: gofmt
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        pass_filenames: false
+```
+
+## Best practices
+
+- **Add a `.gitignore` before your first commit**, not after — it's much easier than untracking files later.
+- **Never rely solely on `.gitignore` for secrets.** Use environment variables and a secrets manager for anything sensitive; treat `.gitignore` as a last line of defense, not the plan.
+- **Keep pre-commit hooks fast** (lint/format, not the full test suite) so they don't slow down every commit — save slower checks for `pre-push` or CI.
+- **Version your hook config** (Husky/pre-commit) so every contributor gets the same checks automatically.
+
+<CardGrid>
+  <Card
+    title="Best Practices Cheatsheet →"
+    href="/docs/git-workflow/best-practices"
+    description="Everything in this section, condensed to one page."
+  />
+</CardGrid>

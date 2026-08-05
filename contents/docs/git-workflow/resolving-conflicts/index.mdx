@@ -1,0 +1,97 @@
+---
+title: Resolving Merge Conflicts
+description: A calm, step-by-step approach to resolving Git merge conflicts.
+keywords: ["merge conflict", "git conflict", "conflict markers", "git merge --abort"]
+---
+
+A conflict happens when Git can't automatically decide how to combine two changes — usually because both branches edited the **same lines** of the **same file**. It is not an error and not a sign you did something wrong; it's expected in collaborative work.
+
+## What a conflict looks like
+
+When `git merge` or `git pull` hits a conflict, it pauses and marks the affected file(s):
+
+```text showLineNumbers
+func RateLimit(r *http.Request) bool {
+<<<<<<< HEAD
+    return tokenBucket.Allow(r.RemoteAddr)
+=======
+    return slidingWindow.Allow(r.RemoteAddr)
+>>>>>>> feature/rate-limiting
+}
+```
+
+- `<<<<<<< HEAD` down to `=======` — the version on **your current branch**.
+- `=======` down to `>>>>>>> feature/rate-limiting` — the version from **the branch being merged in**.
+
+## Step-by-step resolution
+
+<Step>
+  <StepItem title="See what's conflicted">
+    Run `git status` — files with conflicts are listed under "Unmerged paths".
+
+    ```bash
+    git status
+    ```
+  </StepItem>
+
+  <StepItem title="Open each conflicted file">
+    Read both sides. Decide whether to keep one side, the other, or a manual combination of both.
+    Delete the `<<<<<<<`, `=======`, `>>>>>>>` marker lines — they are not valid code and must not
+    remain in the file.
+  </StepItem>
+
+  <StepItem title="Stage the resolved file">
+    Once a file no longer has conflict markers and looks correct, stage it — this tells Git you've
+    resolved that file's conflict.
+
+    ```bash
+    git add internal/ratelimit/limiter.go
+    ```
+  </StepItem>
+
+  <StepItem title="Repeat for every conflicted file, then finish">
+    Once every conflicted file is staged, complete the operation.
+
+    ```bash
+    git status              # confirm no "Unmerged paths" remain
+    git commit               # for a merge conflict — Git pre-fills a merge commit message
+    # or, if this happened during a rebase:
+    git rebase --continue
+    ```
+  </StepItem>
+</Step>
+
+## Backing out entirely
+
+If the conflict is confusing or you want to start over:
+
+```bash showLineNumbers
+git merge --abort      # cancel an in-progress merge, return to pre-merge state
+git rebase --abort     # cancel an in-progress rebase, return to pre-rebase state
+```
+
+Both are completely safe — they simply undo the in-progress operation with no side effects.
+
+## Reducing how often conflicts happen
+
+- **Pull/rebase `main` into your branch frequently** — small, frequent conflicts are far easier to resolve than one giant conflict after a two-week-old branch finally merges.
+- **Keep branches short-lived and focused** — the less two branches touch the same files, the fewer conflicts.
+- **Communicate** — if you and a teammate are both about to touch the same file/function, a 30-second Slack message avoids a conflict entirely.
+
+## Tooling tips
+
+Most editors (VS Code, GoLand) show conflict markers with inline **"Accept Current" / "Accept Incoming" / "Accept Both"** buttons — usually faster and safer than resolving by hand in a plain text editor. `git mergetool` can also launch a configured 3-way diff tool.
+
+<Note title="Best practice" type="success">
+  After resolving, always re-run your tests before committing the resolution. A conflict resolved
+  "logically" (no markers left) can still be functionally wrong — the only way to know is to run
+  the code.
+</Note>
+
+<CardGrid>
+  <Card
+    title="Undoing Changes →"
+    href="/docs/git-workflow/undoing-changes"
+    description="reset, revert, restore, and stash — know which one to reach for."
+  />
+</CardGrid>

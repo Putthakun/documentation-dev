@@ -1,0 +1,161 @@
+---
+title: Pointers
+description: What pointers are in Go, why they exist without pointer arithmetic, and when you actually need one.
+keywords: ["golang pointers", "dereference", "nil pointer", "pass by value", "new"]
+---
+
+## Everything in Go is passed by value
+
+This is the single most important thing to understand. When you pass something to a function, Go copies it. Always.
+
+```go showLineNumbers
+func increment(n int) {
+    n++   // modifies the copy
+}
+
+count := 5
+increment(count)
+fmt.Println(count) // still 5
+```
+
+A pointer is how you opt out: instead of passing the value, you pass its **memory address**, so the function can reach the original.
+
+<Mermaid chart="graph LR
+  V[count<br/>value: 5] -->|address 0xc000018030| P[p *int<br/>holds: 0xc000018030]
+  P -->|*p dereferences| V" />
+
+## Syntax
+
+Two operators, and they're mirror images:
+
+- `&x` — "address of x", gives you a pointer
+- `*p` — "value at p", dereferences the pointer
+
+```go showLineNumbers
+count := 5
+p := &count        // p is of type *int
+
+fmt.Println(p)     // 0xc000018030 — an address
+fmt.Println(*p)    // 5 — the value it points to
+
+*p = 10            // write through the pointer
+fmt.Println(count) // 10 — the original changed
+```
+
+Now the function version works:
+
+```go showLineNumbers
+func increment(n *int) {
+    *n++
+}
+
+count := 5
+increment(&count)
+fmt.Println(count) // 6
+```
+
+<Note title="* means two different things" type="warning">
+  In a **type** (`var p *int`), `*` means "pointer to". In an **expression** (`*p = 10`), it means
+  "dereference". Same symbol, opposite sides of the operation — this is a common early confusion.
+</Note>
+
+## The zero value is nil
+
+```go showLineNumbers
+var p *int          // nil
+fmt.Println(p == nil) // true
+
+fmt.Println(*p)     // PANIC: runtime error: invalid memory address
+```
+
+Dereferencing a nil pointer crashes your program. This is the most common runtime panic in Go, and it usually comes from an unchecked error:
+
+```go showLineNumbers
+user, err := findUser(id)
+// forgetting to check err here...
+fmt.Println(user.Name)  // panics if findUser returned (nil, err)
+```
+
+<Note title="Always check the error before using the value" type="danger">
+  When a function returns `(*T, error)`, the pointer is meaningless if the error is non-nil. Check
+  `err` first, every time — this single habit prevents most nil-pointer panics.
+</Note>
+
+## Pointers to structs
+
+Go automatically dereferences struct pointers on field access, so you almost never write `(*u).Name`:
+
+```go showLineNumbers
+type User struct {
+    Name string
+    Age  int
+}
+
+u := &User{Name: "alice", Age: 30}
+
+fmt.Println(u.Name)     // Go does this for you
+fmt.Println((*u).Name)  // equivalent, but nobody writes this
+
+u.Age = 31              // modifies the original
+```
+
+## new vs &T{}
+
+```go showLineNumbers
+p := new(int)        // pointer to a zero-valued int
+u := &User{}         // pointer to a zero-valued User — preferred
+u2 := &User{Name: "bob"}  // with field values
+```
+
+`new` is rarely used in practice. Use `&T{...}` — it's more flexible and reads better.
+
+## No pointer arithmetic
+
+Unlike C, you cannot do `p++` to walk through memory. Go deliberately removed this: it's the source of most memory-safety bugs, and slices already cover the legitimate use case. Combined with garbage collection, this means Go pointers are safe — you can't create a dangling pointer or read past the end of an allocation.
+
+## When should you use a pointer?
+
+| Use a pointer when... | Use a value when... |
+|---|---|
+| The function must modify the caller's data | The data is read-only in the function |
+| The struct is large and copying is expensive | The struct is small (a few fields) |
+| `nil` is a meaningful state ("not found", "not set") | There's always a valid value |
+| The type has pointer-receiver methods (mutex, etc.) | The type is a simple value type |
+
+```go showLineNumbers
+// Pointer: needs to modify, and nil means "not found"
+func FindUser(id string) (*User, error)
+
+// Value: small, read-only
+func FormatName(u User) string
+
+// Pointer: contains a sync.Mutex, must never be copied
+type Server struct {
+    mu sync.Mutex
+    // ...
+}
+func NewServer() *Server
+```
+
+<Note title="Slices, maps, and channels already contain pointers" type="success">
+  You don't need `*[]int` or `*map[string]int`. A slice header and a map value already reference
+  shared underlying data, so passing them by value lets the function mutate the *contents* already.
+  (You'd only need `*[]int` in the rare case where the function must change the caller's slice
+  header itself — e.g. appending in a way the caller sees.)
+</Note>
+
+## Best practices
+
+- **Don't reach for pointers by default.** Values are simpler, safe to share across goroutines, and often faster for small structs.
+- **Check every error before dereferencing** the value returned alongside it.
+- **Be consistent within a type** — if any method needs a pointer receiver, use pointer receivers for all of them (covered in [Structs & Methods](/docs/golang-fundamentals/structs-methods)).
+- **Never copy a struct containing a `sync.Mutex`.** Always pass it as a pointer; `go vet` catches this.
+- **Use `nil` deliberately** as "absent", and document it — a `*string` field in a struct is a reasonable way to distinguish "empty string" from "not provided" when parsing JSON.
+
+<CardGrid>
+  <Card
+    title="Structs & Methods →"
+    href="/docs/golang-fundamentals/structs-methods"
+    description="Custom types, methods, and value vs pointer receivers."
+  />
+</CardGrid>

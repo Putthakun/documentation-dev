@@ -1,23 +1,23 @@
-export const url = 'https://rubix-documents.vercel.app'
+export const url = 'https://localhost:3000'
 export const siteicon = '/icon.png'
 
 export const gtm = 'GTM-XXXXXXX'
-export const gtmconnected = true
+export const gtmconnected = false
 
-export const sitename = 'Documents'
+export const sitename = 'Dev Notes'
 export const description =
-  'This comprehensive documentation template, crafted with Next.js and available as open-source, delivers a sleek and responsive design, tailored to meet all your project documentation requirements.'
-export const keywords = ['Next.js', 'documentation', 'Rubix Studios', 'open source', 'SEO']
+  'Personal backend & DevOps documentation — Git, Golang, PostgreSQL, architecture patterns, and production practices, written as I learn them.'
+export const keywords = ['backend', 'devops', 'golang', 'postgresql', 'git', 'documentation']
 export const urlimage = '/images/og-image.png'
-export const imagealt = 'Rubix Studios Documentation'
-export const twitterhandle = '@RubixStudios'
+export const imagealt = 'Dev Notes Documentation'
+export const twitterhandle = '@yourhandle'
 
-export const companyname = 'Rubix Studios'
-export const companylink = 'https://rubixstudios.com.au'
+export const companyname = 'Dev Notes'
+export const companylink = 'https://localhost:3000'
 
-export const branding = true
+export const branding = false
 export const rightsidebar = true
-export const feedbackedit = true
+export const feedbackedit = false
 export const tableofcontent = true
 export const totopscroll = true
 

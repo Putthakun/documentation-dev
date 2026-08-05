@@ -1,0 +1,99 @@
+---
+title: Undoing Changes
+description: reset, revert, restore, and stash — Git's four different ways to undo something, and when to use each.
+keywords: ["git reset", "git revert", "git restore", "git stash", "undo commit"]
+---
+
+Git has several "undo" commands that look similar but do very different things. Picking the wrong one is how people lose work — this page is the map.
+
+## Quick decision table
+
+| I want to... | Command |
+|---|---|
+| Discard uncommitted changes to a file | `git restore <file>` |
+| Unstage a file (keep the edits) | `git restore --staged <file>` |
+| Temporarily shelve uncommitted work | `git stash` |
+| Undo the last commit, but keep the changes | `git reset --soft HEAD~1` |
+| Completely delete the last commit and its changes | `git reset --hard HEAD~1` |
+| Undo a commit that's already pushed/shared | `git revert <commit>` |
+
+## `git restore` — working directory changes
+
+```bash showLineNumbers
+git restore file.go              # discard uncommitted edits to file.go, back to last commit
+git restore --staged file.go      # unstage file.go (git add undone), but keep the edits
+```
+
+<Note title="Danger" type="danger">
+  `git restore <file>` permanently discards uncommitted changes with no undo. Double-check
+  `git status`/`git diff` before running it.
+</Note>
+
+## `git stash` — shelve work temporarily
+
+Useful when you need to switch branches but aren't ready to commit:
+
+```bash showLineNumbers
+git stash                 # shelve all uncommitted changes
+git stash list             # see stashed entries
+git stash pop               # re-apply the most recent stash, and remove it from the stash list
+git stash apply             # re-apply the most recent stash, but keep it in the list too
+git stash drop               # delete a stash without applying it
+```
+
+## `git reset` — move the branch pointer
+
+`reset` moves your current branch's pointer to a different commit. It has three modes, differing in what happens to your working directory and staging area:
+
+```bash showLineNumbers
+git reset --soft HEAD~1   # move pointer back 1 commit; keep changes staged
+git reset --mixed HEAD~1  # (default) move pointer back; keep changes, but unstaged
+git reset --hard HEAD~1   # move pointer back; DELETE all changes, working dir matches that commit
+```
+
+<Mermaid chart="graph TD
+  subgraph before [Before: 3 commits]
+  A1((A)) --> B1((B)) --> C1((C, HEAD))
+  end
+  subgraph after [After: git reset --soft HEAD~1]
+  A2((A)) --> B2((B, HEAD))
+  S[C's changes: staged]
+  B2 -.-> S
+  end" />
+
+<Note title="Danger" type="danger">
+  `git reset --hard` permanently discards commits AND uncommitted changes. If those commits have
+  already been pushed, resetting locally does not remove them from the remote — you'd need a force
+  push, which brings its own risks (see [Working with Remotes](/docs/git-workflow/remotes)).
+</Note>
+
+## `git revert` — the safe undo for shared history
+
+Instead of removing a commit, `revert` creates a **new commit** that applies the exact opposite change:
+
+```bash showLineNumbers
+git revert a1b2c3d
+```
+
+```text showLineNumbers
+Before: A - B - C (bad commit) - D
+After:  A - B - C - D - C' (reverts C)
+```
+
+Because it adds to history rather than rewriting it, `revert` is always safe to use on shared branches like `main` — nobody's local history breaks.
+
+## Which one should you actually use?
+
+<Note title="Best practice" type="success">
+  Rule of thumb: **local and not yet pushed → `reset` is fine.** **Already pushed / shared with
+  others → always `revert`, never `reset --hard` + force push.** This single rule prevents almost
+  every "undo" disaster.
+</Note>
+
+<CardGrid>
+  <Card
+    title="Git Workflow Strategies →"
+    href="/docs/git-workflow/workflow-strategies"
+    description="How teams structure branches at scale: Feature Branch, Git Flow, Trunk-Based."
+  />
+</CardGrid>

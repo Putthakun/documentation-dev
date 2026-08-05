@@ -1,0 +1,94 @@
+---
+title: Rebase vs Merge
+description: Two different ways to combine branch histories, the trade-offs, and when to use each.
+keywords: ["git rebase", "git merge", "interactive rebase", "linear history"]
+---
+
+Both `merge` and `rebase` integrate changes from one branch into another — but they produce very different history shapes.
+
+## Merge: preserves history exactly as it happened
+
+```bash showLineNumbers
+git switch main
+git merge feature/rate-limiting
+```
+
+<Mermaid chart="graph LR
+  subgraph Merge
+  A1((A)) --> B1((B)) --> C1((C))
+  A1 --> D1((D)) --> E1((E))
+  C1 --> M((Merge commit))
+  E1 --> M
+  end" />
+
+Merge creates a new **merge commit** joining both branch tips. The original commits on both branches stay exactly as they were. Nothing is rewritten — which makes merge always safe, even on shared/public branches.
+
+## Rebase: replays your commits on top of another branch
+
+```bash showLineNumbers
+git switch feature/rate-limiting
+git rebase main
+```
+
+<Mermaid chart="graph LR
+  subgraph Rebase
+  A2((A)) --> B2((B)) --> C2((C)) --> D2((D'))--> E2((E'))
+  end" />
+
+Rebase takes your branch's commits, temporarily removes them, replays `main`'s new commits, then re-applies yours **one by one on top** — as if you'd branched off the latest `main` all along. The result is a straight, linear history with no merge commit. Note the commits get **new hashes** (`D'`, `E'`) — this is a history rewrite.
+
+## The golden rule of rebase
+
+<Note title="Never rebase shared history" type="danger">
+  Only rebase branches that exist **only on your machine** and that no one else has pulled. Because
+  rebase rewrites commit hashes, rebasing a branch other people are also working on will corrupt
+  their local history the next time they pull.
+</Note>
+
+## Interactive rebase
+
+`git rebase -i` lets you edit, reorder, squash, or drop commits before they land — commonly used to clean up a messy feature branch before opening a pull request.
+
+```bash showLineNumbers
+git rebase -i HEAD~3
+```
+
+This opens an editor listing your last 3 commits:
+
+```text showLineNumbers
+pick a1b2c3d feat: add rate limiter skeleton
+pick e4f5g6h fix typo
+pick i7j8k9l feat: add tests
+
+# Commands:
+# p, pick   = use commit as-is
+# r, reword = use commit, edit the message
+# s, squash = combine with previous commit, keep both messages
+# f, fixup  = combine with previous commit, discard this message
+# d, drop   = remove commit entirely
+```
+
+Changing `pick` to `squash`/`fixup` on the "fix typo" line folds that noisy commit into the previous one, so your PR shows 2 clean commits instead of 3 messy ones.
+
+## Which one should you use?
+
+| Situation | Recommendation |
+|---|---|
+| Updating your local feature branch with the latest `main` | `rebase` (keeps history linear, easier to review) |
+| Merging a finished feature branch into `main` via PR | `merge` (most teams; GitHub/GitLab "Squash and merge" is a common middle ground) |
+| The branch is shared with teammates | `merge` only — never rebase it |
+| Cleaning up your own messy commits before opening a PR | `rebase -i` |
+
+<Note title="Best practice" type="success">
+  A common, low-risk workflow: `git fetch` + `git rebase origin/main` on your **own** feature branch
+  to stay current, then let the team's PR tool (GitHub "Squash and merge", etc.) handle the final
+  merge into `main`. This gets you a clean linear history without ever rebasing shared branches.
+</Note>
+
+<CardGrid>
+  <Card
+    title="Working with Remotes →"
+    href="/docs/git-workflow/remotes"
+    description="push, pull, fetch, and keeping your branch in sync."
+  />
+</CardGrid>

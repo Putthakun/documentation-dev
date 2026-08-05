@@ -1,0 +1,164 @@
+---
+title: Variables, Types & Constants
+description: Declaring variables, Go's zero values, type conversion, and constants with iota.
+keywords: ["golang variables", "zero value", "type conversion", "constants", "iota", "short declaration"]
+---
+
+## Declaring variables
+
+Go has two forms. Inside a function, the short form is idiomatic:
+
+```go showLineNumbers
+// Short declaration — type inferred. Only valid inside functions.
+name := "alice"
+count := 42
+
+// Full form — required at package level, or when you want an explicit type
+// or the zero value.
+var name string = "alice"
+var count int
+var ready bool
+```
+
+Use `:=` by default. Reach for `var` when you specifically want the zero value (`var buf bytes.Buffer`) or when declaring at package scope.
+
+<Note title="Unused variables are a compile error" type="warning">
+  Go refuses to compile if you declare a local variable and never use it. Same for unused imports.
+  This is intentional — it keeps dead code from accumulating — but it surprises everyone coming
+  from other languages. Use `_` to explicitly discard a value you don't need.
+</Note>
+
+## Zero values
+
+Every type has a zero value, and variables are **never** uninitialized garbage. This is a real safety feature — there's no "undefined" in Go.
+
+| Type | Zero value |
+|---|---|
+| `int`, `int64`, `float64` | `0` |
+| `string` | `""` (empty, not `nil`) |
+| `bool` | `false` |
+| Pointers, slices, maps, channels, functions, interfaces | `nil` |
+| `struct` | A struct with every field set to its own zero value |
+
+```go showLineNumbers
+var count int      // 0
+var name string    // ""
+var items []string // nil — but you can still call len() and append() on it
+
+fmt.Println(len(items)) // 0, no panic
+items = append(items, "first") // works fine on a nil slice
+```
+
+<Note title="Design for the zero value" type="success">
+  A well-designed Go type is useful without any initialization. `var mu sync.Mutex` and
+  `var buf bytes.Buffer` are ready to use immediately. When you write your own structs, try to make
+  the zero value meaningful rather than requiring a constructor.
+</Note>
+
+## Basic types
+
+```go showLineNumbers
+// Integers — int is 64-bit on modern platforms. Use int unless you have a
+// specific reason (binary formats, memory pressure, matching an API).
+var i int
+var i8 int8; var i64 int64
+var u uint; var u8 uint8   // byte is an alias for uint8
+
+// Floats — use float64 unless you have a reason not to.
+var f float64
+
+// Strings are immutable UTF-8 byte sequences.
+var s string
+
+// rune is an alias for int32 and represents one Unicode code point.
+var r rune = 'A'
+```
+
+## Type conversion is always explicit
+
+Go never converts between numeric types automatically. This is verbose but eliminates a whole class of silent precision bugs.
+
+```go showLineNumbers
+var i int = 42
+var f float64 = float64(i)   // required — `var f float64 = i` will not compile
+var u uint = uint(f)
+
+// Same for strings and byte slices:
+b := []byte("hello")
+s := string(b)
+```
+
+<Note title="string(int) does not do what you expect" type="danger">
+  `string(65)` produces `"A"` (the character with code point 65), not `"65"`. To convert a number
+  to its decimal text, use `strconv.Itoa(65)` or `fmt.Sprintf("%d", 65)`. Modern Go versions warn
+  about this via `go vet`, but it still catches people out.
+</Note>
+
+## Constants
+
+Constants are computed at compile time and can be untyped, which lets them adapt to context:
+
+```go showLineNumbers
+const MaxRetries = 3
+const AppName = "payments-api"
+
+// Untyped constants take on the type they're used with:
+const timeout = 30
+var d time.Duration = timeout * time.Second  // works — timeout adapts
+
+// Grouped:
+const (
+    StatusActive   = "active"
+    StatusInactive = "inactive"
+)
+```
+
+## iota — enumerations
+
+`iota` is a counter that resets to 0 in each `const` block and increments per line. It's how Go does enums:
+
+```go showLineNumbers
+type Status int
+
+const (
+    StatusPending Status = iota // 0
+    StatusActive                // 1
+    StatusSuspended             // 2
+    StatusClosed                // 3
+)
+
+// Give it a String() method so it prints readably instead of as a number:
+func (s Status) String() string {
+    switch s {
+    case StatusPending:
+        return "pending"
+    case StatusActive:
+        return "active"
+    case StatusSuspended:
+        return "suspended"
+    case StatusClosed:
+        return "closed"
+    default:
+        return "unknown"
+    }
+}
+```
+
+Defining `type Status int` rather than using a bare `int` means the compiler stops you passing an arbitrary number where a `Status` is expected — cheap type safety.
+
+## Best practices
+
+- **Prefer `:=` inside functions**, `var` for zero values and package-level declarations.
+- **Use `int` for counts and indexes** unless a specific size is required.
+- **Use `float64`, not `float32`,** unless you're matching an external format.
+- **Never use floats for money.** Use integer minor units (cents) or a decimal library — floating point cannot represent `0.1` exactly.
+- **Name constants and group related ones** in a single `const` block with a defined type.
+- **Keep names short in small scopes.** `i`, `err`, `w`, `r` are idiomatic Go, not laziness. Longer names belong to package-level identifiers.
+
+<CardGrid>
+  <Card
+    title="Control Flow →"
+    href="/docs/golang-fundamentals/control-flow"
+    description="if, for, switch, and defer."
+  />
+</CardGrid>

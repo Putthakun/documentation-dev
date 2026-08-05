@@ -1,0 +1,203 @@
+---
+title: Structs & Methods
+description: Defining custom types with structs, attaching methods, and choosing between value and pointer receivers.
+keywords: ["golang struct", "methods", "pointer receiver", "value receiver", "embedding", "struct tags"]
+---
+
+## Structs
+
+A struct groups related fields into a custom type. Go has no classes — structs plus methods are how you model things.
+
+```go showLineNumbers
+type User struct {
+    ID        string
+    Name      string
+    Email     string
+    Age       int
+    CreatedAt time.Time
+}
+```
+
+### Creating structs
+
+```go showLineNumbers
+// Field names — always prefer this form
+u := User{
+    ID:   "u_123",
+    Name: "alice",
+    Age:  30,
+}
+
+// Positional — fragile: adding a field breaks every call site. Avoid.
+u := User{"u_123", "alice", "a@example.com", 30, time.Now()}
+
+// Zero value — every field gets its own zero value
+var u User
+
+// Pointer to a new struct
+u := &User{Name: "alice"}
+```
+
+<Note title="Always use field names" type="success">
+  Positional struct literals break silently when someone reorders or inserts a field. Named fields
+  also let you omit the ones you don't care about, and they document themselves at the call site.
+</Note>
+
+### Struct tags
+
+Tags are metadata strings read by libraries via reflection — most commonly for JSON and database mapping:
+
+```go showLineNumbers
+type User struct {
+    ID        string    `json:"id" db:"id"`
+    Name      string    `json:"name" db:"name"`
+    Email     string    `json:"email,omitempty" db:"email"`
+    Password  string    `json:"-"`                    // never serialized
+    CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+```
+
+- `json:"id"` — use `id` as the JSON key instead of `ID`
+- `omitempty` — leave the field out entirely when it's the zero value
+- `json:"-"` — never include this field. **Use this on every secret**: passwords, tokens, internal flags.
+
+## Methods
+
+A method is a function with a **receiver** — the value it's attached to. Go has no `this` or `self`; you name the receiver yourself.
+
+```go showLineNumbers
+type Rectangle struct {
+    Width, Height float64
+}
+
+// Value receiver — operates on a copy
+func (r Rectangle) Area() float64 {
+    return r.Width * r.Height
+}
+
+// Pointer receiver — can modify the original
+func (r *Rectangle) Scale(factor float64) {
+    r.Width *= factor
+    r.Height *= factor
+}
+
+rect := Rectangle{Width: 3, Height: 4}
+fmt.Println(rect.Area())  // 12
+rect.Scale(2)             // Go automatically takes &rect for you
+fmt.Println(rect.Area())  // 48
+```
+
+## Value vs pointer receivers
+
+This is the decision that trips up every Go beginner, and it produces bugs that compile perfectly:
+
+<Mermaid chart="graph TD
+  A[Method needs to modify the receiver?] -->|Yes| P[Pointer receiver]
+  A -->|No| B[Is the struct large,<br/>or does it contain a mutex?]
+  B -->|Yes| P
+  B -->|No| V[Value receiver]
+  P --> C[Be consistent:<br/>if any method uses a pointer,<br/>use pointers for ALL methods]
+  V --> C" />
+
+```go showLineNumbers
+type Counter struct {
+    count int
+}
+
+// BUG: value receiver gets a copy — the increment is thrown away
+func (c Counter) IncrementBroken() {
+    c.count++
+}
+
+// Correct: pointer receiver modifies the original
+func (c *Counter) Increment() {
+    c.count++
+}
+
+var c Counter
+c.IncrementBroken()
+fmt.Println(c.count)  // 0 — silently did nothing
+c.Increment()
+fmt.Println(c.count)  // 1
+```
+
+<Note title="Pick one and stay consistent per type" type="warning">
+  Mixing receiver kinds on the same type causes subtle problems with interface satisfaction: a
+  `*T` has access to both value and pointer methods, but a plain `T` only has the value methods —
+  so `T` may fail to satisfy an interface that `*T` satisfies. The standard guidance: **if any
+  method needs a pointer receiver, give every method on that type a pointer receiver.**
+</Note>
+
+## Embedding — composition, not inheritance
+
+Embedding a type without a field name promotes its fields and methods to the outer struct:
+
+```go showLineNumbers
+type Base struct {
+    ID        string
+    CreatedAt time.Time
+}
+
+func (b Base) Age() time.Duration {
+    return time.Since(b.CreatedAt)
+}
+
+type User struct {
+    Base           // embedded — no field name
+    Name  string
+}
+
+u := User{
+    Base: Base{ID: "u_123", CreatedAt: time.Now()},
+    Name: "alice",
+}
+
+fmt.Println(u.ID)     // promoted from Base
+fmt.Println(u.Age())  // method promoted too
+fmt.Println(u.Base.ID) // the explicit path still works
+```
+
+This is composition: `User` **has a** `Base`, it doesn't inherit from it. There's no polymorphism here — a `User` is not substitutable for a `Base`. Interfaces provide that, and they're next.
+
+<Note title="Don't overuse embedding" type="warning">
+  Embedding promotes the entire API of the embedded type, including methods you may not want to
+  expose. A named field (`base Base`) is often clearer. Reserve embedding for genuine
+  "is-composed-of" relationships and for embedding interfaces in test doubles.
+</Note>
+
+## Constructors
+
+Go has no constructor keyword. The convention is a `New...` function returning the type:
+
+```go showLineNumbers
+func NewUser(name, email string) (*User, error) {
+    if name == "" {
+        return nil, errors.New("name is required")
+    }
+    return &User{
+        ID:        uuid.NewString(),
+        Name:      name,
+        Email:     email,
+        CreatedAt: time.Now(),
+    }, nil
+}
+```
+
+Use one when construction requires validation, defaults, or generating fields. If the zero value is already usable, skip the constructor entirely — that's more idiomatic.
+
+## Best practices
+
+- **Use named fields in struct literals**, always.
+- **Add `json:"-"` to every sensitive field** so it can never leak into a response or log.
+- **Be consistent with receiver types** across a type's methods.
+- **Keep structs focused.** A struct with 25 fields is usually several structs wearing a trenchcoat.
+- **Name the receiver with 1–2 letters** derived from the type (`r Rectangle`, `u *User`) — idiomatic Go, and never `this` or `self`.
+- **Prefer composition over deep embedding chains.** Go deliberately has no inheritance; don't rebuild it.
+
+<CardGrid>
+  <Card
+    title="Interfaces →"
+    href="/docs/golang-fundamentals/interfaces"
+    description="Implicit satisfaction, type switches, and the typed-nil trap."
+  />
+</CardGrid>

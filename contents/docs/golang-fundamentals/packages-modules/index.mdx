@@ -1,0 +1,179 @@
+---
+title: Packages & Modules
+description: How Go code is organized into packages and modules — go.mod, imports, exported names, and internal/.
+keywords: ["golang packages", "go modules", "go.mod", "go.sum", "exported", "internal", "go mod tidy"]
+---
+
+Go has two levels of organization: **packages** (a directory of `.go` files, the unit of compilation and visibility) and **modules** (a collection of packages versioned together, the unit of dependency management).
+
+## Packages
+
+Every `.go` file starts with a package declaration. All files in one directory must declare the same package name:
+
+```go showLineNumbers
+package user
+```
+
+Conventions:
+
+- **Package name = directory name.** A directory `internal/user/` contains `package user`.
+- **Short, lowercase, singular, no underscores:** `user`, `httputil`, `auth` — not `Users`, `user_service`, or `userUtils`.
+- **`package main` marks an executable.** It needs a `func main()` and produces a binary; every other package is a library.
+
+### Names are the API — capitalization is the access control
+
+Go has no `public`/`private` keywords. **A capitalized identifier is exported** (visible to other packages); a lowercase one is not:
+
+```go showLineNumbers title="internal/user/user.go"
+package user
+
+type User struct {      // exported
+    ID   string         // exported field
+    Name string         // exported field
+    salt string         // unexported — invisible outside this package
+}
+
+func New(name string) *User { }   // exported
+func hashPassword(s string) { }   // unexported — internal helper
+```
+
+<Note title="Don't stutter" type="success">
+  The package name is part of every call, so `user.User` and `user.NewUser()` read badly. Prefer
+  `user.New()`, `http.Client` (not `http.HTTPClient`), `bytes.Buffer` (not `bytes.BytesBuffer`).
+  Name things assuming the package qualifier is already there.
+</Note>
+
+## Imports
+
+```go showLineNumbers
+import (
+    "fmt"           // standard library
+    "net/http"
+
+    "github.com/google/uuid"          // third-party
+
+    "github.com/you/app/internal/user" // your own module
+)
+```
+
+`gofmt`/`goimports` groups and sorts these automatically — standard library first, then everything else. Let the tool do it.
+
+```go showLineNumbers
+import (
+    "fmt"
+    f "fmt"            // alias, for name collisions
+    _ "github.com/lib/pq"  // blank import — runs init() only, common for DB drivers
+)
+```
+
+The import path is the **module path plus the directory**, not the package name — which is why the module path in `go.mod` matters.
+
+## Modules
+
+A module is defined by `go.mod` at the repository root:
+
+```go showLineNumbers title="go.mod"
+module github.com/you/app
+
+go 1.25
+
+require (
+    github.com/google/uuid v1.6.0
+    github.com/jackc/pgx/v5 v5.7.1
+)
+
+require (
+    golang.org/x/text v0.19.0 // indirect
+)
+```
+
+- **`module`** — the import path prefix for every package in this repo.
+- **`go`** — the language version, which also gates behavior changes (like the Go 1.22 loop variable fix).
+- **`require`** — direct dependencies; `// indirect` marks dependencies of your dependencies.
+
+### go.sum
+
+`go.sum` records a cryptographic checksum for every dependency version. If a published module's contents ever change, the build fails instead of silently pulling different code.
+
+<Note title="Commit both files" type="warning">
+  `go.mod` and `go.sum` both belong in version control. Without `go.sum`, you lose the guarantee
+  that CI and your teammates build the exact same dependency code. Never add them to `.gitignore`.
+</Note>
+
+### Everyday module commands
+
+| Command | What it does |
+|---|---|
+| `go mod init github.com/you/app` | Create a new module |
+| `go get github.com/pkg/name` | Add or upgrade a dependency |
+| `go get -u ./...` | Upgrade all dependencies to latest minor/patch |
+| `go mod tidy` | Add anything imported but missing, remove anything unused |
+| `go mod download` | Download deps without building (useful for Docker layer caching) |
+| `go mod why github.com/pkg/name` | Explain why a dependency is in your graph |
+
+Run `go mod tidy` before committing — it's the module equivalent of cleaning up unused imports.
+
+## internal/ — enforced privacy
+
+A package under a directory named `internal/` can only be imported by code rooted in the parent of that `internal/` directory. The **compiler** enforces this:
+
+<FileTree>
+  <Folder name="app" defaultOpen>
+    <Folder name="cmd" defaultOpen>
+      <Folder name="api">
+        <File name="main.go" />
+      </Folder>
+    </Folder>
+    <Folder name="internal" defaultOpen>
+      <Folder name="user">
+        <File name="user.go" />
+      </Folder>
+      <Folder name="database">
+        <File name="postgres.go" />
+      </Folder>
+    </Folder>
+    <Folder name="pkg">
+      <Folder name="httputil">
+        <File name="middleware.go" />
+      </Folder>
+    </Folder>
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+Here `internal/user` is importable from anywhere inside `github.com/you/app`, but **no other module can import it** — even though it's a public GitHub repo. `pkg/httputil` is importable by anyone.
+
+<Note title="Default to internal/" type="success">
+  Put code in `internal/` unless you intend to support it as a public API for other projects.
+  Anything exported outside `internal/` is a promise you have to keep — moving it later is a
+  breaking change for your users.
+</Note>
+
+## init()
+
+A package may define `func init()`, which runs once before `main()`. Use it rarely — it runs implicitly, which makes program startup hard to follow and hard to test.
+
+```go showLineNumbers
+func init() {
+    // Prefer explicit setup in main() over this.
+}
+```
+
+## Best practices
+
+- **Name packages for what they provide,** not what they contain. Avoid grab-bag packages named `util`, `common`, `helpers`, or `models` — they attract unrelated code forever.
+- **Keep the exported surface small.** Export only what callers need; everything else stays lowercase.
+- **Use `internal/`** for application code by default.
+- **Use the repo URL as the module path** from day one.
+- **Run `go mod tidy` before committing.**
+- **Avoid circular imports** — Go forbids them outright. If two packages need each other, the shared piece usually wants to be a third package (or an interface defined in the consumer).
+
+Project layout at a larger scale — where handlers, services, and repositories live — is covered in [Code Organization](/docs/code-organization).
+
+<CardGrid>
+  <Card
+    title="Errors: The Basics →"
+    href="/docs/golang-fundamentals/errors-basics"
+    description="Why Go returns errors instead of throwing them."
+  />
+</CardGrid>

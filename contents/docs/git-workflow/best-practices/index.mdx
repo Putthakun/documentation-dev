@@ -1,0 +1,75 @@
+---
+title: Best Practices Cheatsheet
+description: A condensed, one-page reference of everything in the Git Workflow section.
+keywords: ["git best practices", "git cheatsheet", "commit conventions", "pull request etiquette"]
+---
+
+The full reasoning behind each of these lives on the earlier pages — this page is just the condensed reference to skim when you already know the concepts and need a quick reminder.
+
+## Commits
+
+- Commit small, logical, single-purpose changes — not "end of day" dumps.
+- Use [Conventional Commits](/docs/git-workflow/basics#writing-good-commit-messages): `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`.
+- Write the *why*, not the *what* — the diff already shows what changed.
+- Never commit secrets. Use `.gitignore` + environment variables (see [.gitignore & Git Hooks](/docs/git-workflow/gitignore-hooks)).
+- `git diff --staged` before every `git commit` — know exactly what you're about to commit.
+- Never `--amend` or rewrite a commit that's already been pushed and shared.
+
+## Branching
+
+- Name branches by intent: `feature/x`, `fix/x`, `chore/x` — never `test`, `wip`, `asdf`.
+- Keep branches short-lived. Merge or rebase from `main` frequently to avoid painful conflicts later.
+- Delete branches after merging — both locally (`git branch -d`) and on the remote.
+- Default to [Feature Branch Workflow](/docs/git-workflow/workflow-strategies) unless you have a specific reason for Git Flow or Trunk-Based.
+
+## Rebase vs Merge
+
+- `rebase` only on branches that are **local and unshared**. Never rebase a branch others have pulled.
+- `merge` is always safe, including on shared branches — it never rewrites history.
+- Use `rebase -i` to clean up your own commits (squash, reword) before opening a PR.
+
+## Remotes
+
+- `git fetch` first if unsure what's changed remotely — it's always safe and non-destructive.
+- Pull (or rebase) before you push; push is rejected if the remote has moved ahead of you.
+- Never `--force` push to `main` or any shared branch. Prefer `--force-with-lease` on your own branches.
+
+## Undoing changes
+
+| Situation | Command |
+|---|---|
+| Discard uncommitted file changes | `git restore <file>` |
+| Unstage a file | `git restore --staged <file>` |
+| Shelve work temporarily | `git stash` |
+| Undo a local, unpushed commit | `git reset --soft/--hard HEAD~1` |
+| Undo a pushed/shared commit | `git revert <commit>` |
+
+<Note title="The one rule that prevents most disasters" type="danger">
+  Local and unpushed → `reset` is fine. Already pushed / shared → always `revert`, never `reset
+  --hard` + force push.
+</Note>
+
+## Conflicts
+
+1. `git status` to see conflicted files.
+2. Open each file, resolve manually, delete all `<<<<<<<` / `=======` / `>>>>>>>` markers.
+3. `git add <file>` for each resolved file.
+4. `git commit` (merge) or `git rebase --continue` (rebase).
+5. **Run your tests** before considering it done — a conflict with no markers left can still be logically wrong.
+6. `git merge --abort` / `git rebase --abort` to bail out cleanly at any point.
+
+## Pull request etiquette
+
+- Keep PRs small and focused — easier and faster to review, easier to revert if something's wrong.
+- Write a description that explains *why*, links related issues/tickets, and calls out anything reviewers should pay special attention to.
+- Respond to review comments with either a fix or a clear counter-argument — don't silently ignore feedback.
+- Make sure CI (tests, lint) passes before requesting review.
+- Squash noisy "fix typo" / "address review" commits before merge (via `rebase -i` or the platform's "Squash and merge" button).
+
+<CardGrid>
+  <Card
+    title="← Back to Git Workflow overview"
+    href="/docs/git-workflow"
+    description="Jump to any section."
+  />
+</CardGrid>
