@@ -1,4 +1,4 @@
-export const url = 'https://localhost:3000'
+export const url = 'https://documentation-dev.vercel.app'
 export const siteicon = '/icon.png'
 
 export const gtm = 'GTM-XXXXXXX'
@@ -13,7 +13,7 @@ export const imagealt = 'Dev Notes Documentation'
 export const twitterhandle = '@yourhandle'
 
 export const companyname = 'Dev Notes'
-export const companylink = 'https://localhost:3000'
+export const companylink = 'https://documentation-dev.vercel.app'
 
 export const branding = false
 export const rightsidebar = true
