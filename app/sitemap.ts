@@ -4,10 +4,21 @@ import { PageRoutes } from '@/lib/pageroutes'
 import { Settings } from '@/types/settings'
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  return PageRoutes.map((page) => ({
-    url: `${Settings.metadataBase}${page.href}`,
-    lastModified: new Date().toISOString(),
-    changeFrequency: 'monthly',
-    priority: 0.8,
-  }))
+  const lastModified = new Date().toISOString()
+
+  return [
+    {
+      url: `${Settings.metadataBase}`,
+      lastModified,
+      changeFrequency: 'monthly' as const,
+      priority: 1,
+    },
+    // Doc pages are served under /docs, so page.href needs that prefix.
+    ...PageRoutes.map((page) => ({
+      url: `${Settings.metadataBase}/docs${page.href}`,
+      lastModified,
+      changeFrequency: 'monthly' as const,
+      priority: 0.8,
+    })),
+  ]
 }
