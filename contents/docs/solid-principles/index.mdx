@@ -1,16 +1,477 @@
 ---
 title: SOLID Principles
 description: The five SOLID principles of object-oriented and interface design, applied to Go.
+keywords: ["SOLID", "single responsibility", "open closed", "liskov substitution", "interface segregation", "dependency inversion", "golang design principles", "dependency injection"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
+## What SOLID is
+
+Five design principles, named by Robert C. Martin, about where to draw boundaries so that code stays changeable. They were written for class-based OOP, but Go's interfaces and composition express most of them more directly than Java ever did.
+
+| | Principle | One-line version |
+|---|---|---|
+| **S** | Single Responsibility | One reason to change |
+| **O** | Open/Closed | Extend by adding, not editing |
+| **L** | Liskov Substitution | An implementation must not surprise the caller |
+| **I** | Interface Segregation | Small interfaces, per consumer |
+| **D** | Dependency Inversion | Depend on interfaces, not concrete types |
+
+They aren't rules to score code against. They're **names for the reason a change is painful** — when a small feature forces you to edit six files, one of these usually explains why.
+
+## S — Single Responsibility
+
+A unit of code should have **one reason to change**. Note the phrasing: not "does one thing", which is too vague to be useful. The test is *who* asks for changes to it.
+
+A struct that violates it:
+
+```go showLineNumbers
+// Three different people can force a change here:
+// the product owner (rules), the DBA (schema), the marketing team (email copy).
+type UserManager struct{ db *pgxpool.Pool }
+
+func (m *UserManager) Register(ctx context.Context, email, name string) error {
+    if !strings.Contains(email, "@") {                        // business rule
+        return errors.New("invalid email")
+    }
+    _, err := m.db.Exec(ctx,                                  // persistence
+        `INSERT INTO users (email, name) VALUES ($1, $2)`, email, name)
+    if err != nil {
+        return err
+    }
+    body := fmt.Sprintf("Welcome %s! Click here to...", name) // email content
+    return smtp.SendMail("smtp.example.com:587", nil,
+        "noreply@example.com", []string{email}, []byte(body))
+}
+```
+
+Split by who owns the change:
+
+```go showLineNumbers
+// Business rules — owned by the domain.
+type UserService struct {
+    store    UserStore
+    notifier Notifier
+}
+
+func (s *UserService) Register(ctx context.Context, email, name string) (*User, error) {
+    if err := validateEmail(email); err != nil {
+        return nil, err
+    }
+    u := &User{Email: email, Name: name}
+    if err := s.store.Create(ctx, u); err != nil {
+        return nil, fmt.Errorf("creating user: %w", err)
+    }
+    if err := s.notifier.SendWelcome(ctx, u); err != nil {
+        slog.Error("welcome notification failed", "user_id", u.ID, "err", err)
+    }
+    return u, nil
+}
+```
+
+Now schema changes touch only the store, email copy changes touch only the notifier, and the registration rules live in one readable function.
+
+<Note title="Applies to functions and packages too" type="success">
+  The same test works at every scale. A `utils` package fails it by construction — it changes for
+  every reason there is. Name packages after what they're responsible for (`payment`, `auth`,
+  `ratelimit`), never after what kind of code is inside (`helpers`, `common`, `models`).
 </Note>
 
-## What to expect here
+## O — Open/Closed
 
-- Single Responsibility Principle
-- Open/Closed Principle
-- Liskov Substitution Principle
-- Interface Segregation Principle
-- Dependency Inversion Principle
+Open for extension, closed for modification: **adding a case should mean adding code, not editing existing code.**
+
+The smell is a `switch` that grows every time the business does:
+
+```go showLineNumbers
+// Every new payment method edits this function — and risks breaking the others.
+func Charge(method string, amount int64) error {
+    switch method {
+    case "credit_card":
+        // 20 lines of Stripe
+    case "paypal":
+        // 20 lines of PayPal
+    case "promptpay":
+        // 20 lines of PromptPay
+    }
+    return fmt.Errorf("unknown method %q", method)
+}
+```
+
+Invert it with an interface:
+
+```go showLineNumbers
+type PaymentMethod interface {
+    Charge(ctx context.Context, amountCents int64) (*Receipt, error)
+}
+
+type Processor struct {
+    methods map[string]PaymentMethod
+}
+
+func (p *Processor) Register(name string, m PaymentMethod) {
+    p.methods[name] = m
+}
+
+func (p *Processor) Charge(ctx context.Context, name string, amount int64) (*Receipt, error) {
+    m, ok := p.methods[name]
+    if !ok {
+        return nil, fmt.Errorf("unsupported payment method %q", name)
+    }
+    return m.Charge(ctx, amount)
+}
+```
+
+Adding crypto payments is now a new file plus one `Register` call in `main.go`. `Processor` never changes, so it can't regress.
+
+<Note title="Don't invert every switch" type="warning">
+  A `switch` on a set that genuinely never grows — HTTP methods, days of the week, a closed enum
+  — is fine and clearer than an interface. Open/Closed pays off where **you expect new variants**.
+  Applying it everywhere buys indirection you never cash in.
+</Note>
+
+## L — Liskov Substitution
+
+Any implementation of an interface must be usable **wherever that interface is expected, without the caller changing behaviour**. Go's compiler checks the method signatures; it can't check the contract, so this one is on you.
+
+A violation the compiler happily accepts:
+
+```go showLineNumbers
+type Store interface {
+    Save(ctx context.Context, u *User) error
+    Delete(ctx context.Context, id int64) error
+}
+
+type ReadOnlyStore struct{ /* ... */ }
+
+func (s *ReadOnlyStore) Save(ctx context.Context, u *User) error {
+    panic("not supported")                    // caller had no way to know
+}
+
+func (s *ReadOnlyStore) Delete(ctx context.Context, id int64) error {
+    return nil                                // worse: silently does nothing
+}
+```
+
+Both are Liskov violations. The panic breaks a caller that reasonably expected an error; the silent no-op is worse, because it fails without telling anyone.
+
+The fix is usually **a smaller interface** — which is Interface Segregation, and the reason these two principles keep showing up together:
+
+```go showLineNumbers
+type UserReader interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+}
+
+type UserWriter interface {
+    Save(ctx context.Context, u *User) error
+    Delete(ctx context.Context, id int64) error
+}
+
+// A read-only cache satisfies UserReader honestly and can't be
+// passed where writes are required — the compiler stops it.
+```
+
+Subtler contract violations to watch for:
+
+- **Stricter preconditions.** The interface accepts any string; your implementation panics on empty. Callers can't know.
+- **Different error semantics.** One implementation returns a sentinel for "not found", another returns `nil, nil`. Every caller now needs an `if` per implementation.
+- **Blocking where callers expect speed.** An in-memory fake returns instantly; the real one makes three network calls without honouring `ctx`.
+
+<Note title="Document the contract in the interface" type="success">
+  ```go
+  type UserStore interface {
+      // GetByID returns ErrNotFound if no user has that id.
+      // It must respect ctx cancellation.
+      GetByID(ctx context.Context, id int64) (*User, error)
+  }
+  ```
+  The compiler enforces signatures; a comment plus a shared test suite is how you enforce the rest.
+  If you have several implementations, write one table test and run it against all of them.
+</Note>
+
+## I — Interface Segregation
+
+No client should be forced to depend on methods it doesn't use. This is the principle Go pushes you toward hardest, and the standard library is the proof — `io.Reader`, `io.Writer`, `fmt.Stringer`, and `error` all have exactly one method.
+
+The fat interface:
+
+```go showLineNumbers
+type UserRepository interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+    GetByEmail(ctx context.Context, email string) (*User, error)
+    List(ctx context.Context, limit, offset int) ([]User, error)
+    Create(ctx context.Context, u *User) error
+    Update(ctx context.Context, u *User) error
+    Delete(ctx context.Context, id int64) error
+    CountActive(ctx context.Context) (int, error)
+    SearchByName(ctx context.Context, q string) ([]User, error)
+}
+```
+
+A service that only reads a user by ID still has to be handed all eight methods — and every test fake has to implement all eight. Instead, let each consumer declare what it needs:
+
+```go showLineNumbers title="internal/auth/auth.go"
+package auth
+
+// Auth needs exactly one method. So it asks for exactly one.
+type UserFinder interface {
+    GetByEmail(ctx context.Context, email string) (*user.User, error)
+}
+
+type Service struct{ users UserFinder }
+```
+
+```go showLineNumbers title="internal/auth/auth_test.go"
+type fakeFinder struct{ u *user.User }
+
+func (f fakeFinder) GetByEmail(context.Context, string) (*user.User, error) {
+    return f.u, nil
+}
+// One method. That's the whole test double — no mocking library.
+```
+
+The concrete `postgres.UserStore` still has all eight methods and satisfies every one of these small interfaces implicitly. Nothing is duplicated; each consumer just sees a narrower view.
+
+<Note title="Interfaces belong to the consumer" type="success">
+  This is the single most Go-specific piece of design advice on this page. Because satisfaction is
+  implicit, define the interface in the package that *calls* it, not next to the implementation.
+  The `postgres` package shouldn't export an interface at all — it exports a struct, and each
+  consumer describes the slice of it that it needs. See
+  [Interfaces](/docs/golang-fundamentals/interfaces).
+</Note>
+
+## D — Dependency Inversion
+
+High-level code should not depend on low-level details; both should depend on abstractions.
+
+<Mermaid chart="graph TD
+  S[UserService<br/>high-level policy] -->|depends on| I[UserStore interface<br/>declared in the service package]
+  P[postgres.UserStore<br/>low-level detail] -.->|satisfies| I
+  F[in-memory fake<br/>low-level detail] -.->|satisfies| I" />
+
+Without inversion, `UserService` would point straight at `postgres.UserStore`. Here both point at the interface instead — and the arrow from `postgres` runs *upward*. That reversal is the "inversion". The service package imports nothing from `postgres`, so it can be compiled, tested, and understood on its own.
+
+Concretely:
+
+```go showLineNumbers
+// Before: the service is welded to pgx.
+type UserService struct {
+    pool *pgxpool.Pool                    // can't test without a real database
+}
+
+func (s *UserService) GetUser(ctx context.Context, id int64) (*User, error) {
+    var u User
+    err := s.pool.QueryRow(ctx, `SELECT id, email FROM users WHERE id = $1`, id).
+        Scan(&u.ID, &u.Email)
+    // business logic and SQL, tangled
+}
+```
+
+```go showLineNumbers
+// After: the service depends on an interface it defines itself.
+type UserStore interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+}
+
+type UserService struct {
+    store UserStore
+}
+
+func NewUserService(store UserStore) *UserService {
+    return &UserService{store: store}
+}
+```
+
+Wiring stays explicit and lives in one place:
+
+```go showLineNumbers title="cmd/api/main.go"
+pool, err := db.New(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+store := postgres.NewUserStore(pool)          // low-level detail, chosen once
+svc := user.NewUserService(store)             // injected into the high-level policy
+handler := httpapi.NewUserHandler(svc)
+```
+
+<Note title="Dependency injection in Go means passing arguments" type="warning">
+  There's no framework and no container needed. "DI" in Go is just constructor parameters,
+  assembled in `main.go`. If you find yourself reaching for a DI library on a service with a
+  dozen dependencies, wire it by hand first — it's usually 20 readable lines.
+</Note>
+
+## A real example: refactoring toward SOLID
+
+Start with a plausible first draft — a handler that does everything:
+
+```go showLineNumbers title="Before"
+type OrderHandler struct {
+    pool   *pgxpool.Pool
+    stripe *stripe.Client
+}
+
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req CreateOrderRequest
+    json.NewDecoder(r.Body).Decode(&req)
+
+    if req.Quantity <= 0 {                                     // business rule
+        http.Error(w, "quantity must be positive", 400)
+        return
+    }
+
+    var price int64                                            // persistence
+    h.pool.QueryRow(r.Context(),
+        `SELECT price FROM products WHERE id = $1`, req.ProductID).Scan(&price)
+
+    total := price * int64(req.Quantity)
+    if req.Coupon == "SAVE10" {                                // pricing rule
+        total = total * 90 / 100
+    }
+
+    ch, err := h.stripe.Charge(req.CardToken, total)           // payment
+    if err != nil {
+        http.Error(w, "payment failed", 402)
+        return
+    }
+
+    h.pool.Exec(r.Context(),                                   // persistence again
+        `INSERT INTO orders (product_id, quantity, total, charge_id)
+         VALUES ($1, $2, $3, $4)`,
+        req.ProductID, req.Quantity, total, ch.ID)
+
+    w.WriteHeader(http.StatusCreated)
+}
+```
+
+Every principle is violated at once: four reasons to change (**S**), a new coupon means editing this function (**O**), it depends on `pgxpool` and `stripe` directly (**D**), and it can't be tested without both (**I**).
+
+Refactored:
+
+```go showLineNumbers title="internal/order/service.go"
+package order
+
+// I + D: each interface is small and defined here, by the consumer.
+type ProductStore interface {
+    PriceOf(ctx context.Context, productID int64) (int64, error)
+}
+
+type OrderStore interface {
+    Create(ctx context.Context, o *Order) error
+}
+
+type PaymentGateway interface {
+    Charge(ctx context.Context, token string, amountCents int64) (*Charge, error)
+}
+
+// O: new discounts are new implementations, not edits.
+type DiscountRule interface {
+    Apply(coupon string, subtotal int64) int64
+}
+
+type Service struct {
+    products  ProductStore
+    orders    OrderStore
+    payments  PaymentGateway
+    discounts DiscountRule
+}
+
+// S: one reason to change — the rules of placing an order.
+func (s *Service) Place(ctx context.Context, req PlaceRequest) (*Order, error) {
+    if req.Quantity <= 0 {
+        return nil, ErrInvalidQuantity
+    }
+
+    price, err := s.products.PriceOf(ctx, req.ProductID)
+    if err != nil {
+        return nil, fmt.Errorf("looking up price: %w", err)
+    }
+
+    total := s.discounts.Apply(req.Coupon, price*int64(req.Quantity))
+
+    charge, err := s.payments.Charge(ctx, req.CardToken, total)
+    if err != nil {
+        return nil, fmt.Errorf("charging card: %w", err)
+    }
+
+    o := &Order{
+        ProductID: req.ProductID,
+        Quantity:  req.Quantity,
+        Total:     total,
+        ChargeID:  charge.ID,
+    }
+    if err := s.orders.Create(ctx, o); err != nil {
+        return nil, fmt.Errorf("saving order: %w", err)
+    }
+    return o, nil
+}
+```
+
+The handler shrinks to what a handler should be — translating between HTTP and the domain:
+
+```go showLineNumbers title="internal/httpapi/order.go"
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req order.PlaceRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid body", http.StatusBadRequest)
+        return
+    }
+
+    o, err := h.svc.Place(r.Context(), req)
+    switch {
+    case errors.Is(err, order.ErrInvalidQuantity):
+        http.Error(w, err.Error(), http.StatusBadRequest)
+    case errors.Is(err, order.ErrPaymentDeclined):
+        http.Error(w, err.Error(), http.StatusPaymentRequired)
+    case err != nil:
+        slog.Error("placing order", "err", err)
+        http.Error(w, "internal error", http.StatusInternalServerError)
+    default:
+        w.WriteHeader(http.StatusCreated)
+        json.NewEncoder(w).Encode(o)
+    }
+}
+```
+
+And the business logic is now testable in milliseconds, with no database and no Stripe account:
+
+```go showLineNumbers title="internal/order/service_test.go"
+func TestPlace_AppliesDiscount(t *testing.T) {
+    svc := &Service{
+        products:  fakeProducts{price: 1000},
+        orders:    &fakeOrders{},
+        payments:  &fakePayments{},
+        discounts: PercentOff{Coupon: "SAVE10", Percent: 10},
+    }
+
+    o, err := svc.Place(context.Background(), PlaceRequest{
+        ProductID: 1, Quantity: 2, Coupon: "SAVE10",
+    })
+    if err != nil {
+        t.Fatalf("Place() error = %v", err)
+    }
+    if o.Total != 1800 {
+        t.Errorf("Total = %d, want 1800", o.Total)
+    }
+}
+```
+
+That test is the real payoff. Testing strategy itself gets its own page under [Golang Best Practices](/docs/testing).
+
+## Best practices
+
+- **Use SOLID as a diagnosis, not a checklist.** When a change hurts, name which principle explains it.
+- **"One reason to change" beats "one thing".** Ask who requests the change.
+- **Keep interfaces at 1–3 methods**, defined in the consuming package.
+- **Every implementation must honour the contract** — no panics, no silent no-ops. Document error semantics on the interface.
+- **Wire dependencies in `main.go`.** Constructor parameters are all the DI Go needs.
+- **Don't abstract on the first instance.** Two implementations (or one plus a test fake) justify an interface; one does not.
+- **Watch for `utils`/`common` packages** — a guaranteed Single Responsibility failure.
+- **If a test needs a database to check a business rule, that's a Dependency Inversion problem**, not a testing problem.
+
+<CardGrid>
+  <Card
+    title="Code Organization →"
+    href="/docs/code-organization"
+    description="Turning these principles into an actual Go project layout."
+  />
+</CardGrid>

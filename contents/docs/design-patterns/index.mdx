@@ -1,14 +1,506 @@
 ---
 title: Design Patterns
-description: Creational, structural, and behavioral design patterns with Go examples.
+description: Creational, structural, and behavioral design patterns written the way Go actually does them.
+keywords: ["design patterns", "golang patterns", "factory", "builder", "functional options", "singleton", "adapter", "decorator", "facade", "strategy", "observer", "command"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
+## What a design pattern is
+
+A design pattern is a **named solution to a recurring problem** in how objects are created, composed, or communicate. The value is mostly in the name: saying "that's a Strategy" communicates a whole shape in one word.
+
+The classic catalogue (the "Gang of Four" book) was written for C++ and Java, where you have classes, constructors, and inheritance. **Go has none of those.** So several patterns look completely different here, and a few disappear entirely because the language already handles them:
+
+| Classic pattern | In Go |
+|---|---|
+| Strategy | Just an interface, or a function value |
+| Iterator | `range`, and `iter.Seq` since Go 1.23 |
+| Template Method | Composition with an embedded struct or a func field |
+| Abstract Factory | A constructor returning an interface |
+| Builder | Functional options |
+
+<Note title="Patterns are vocabulary, not a checklist" type="warning">
+  The most common mistake with this topic is treating patterns as things to *add*. They're names
+  for shapes that emerge when a real problem pushes you there. A Go codebase full of
+  `AbstractUserFactoryProvider` is worse than one with plain functions. Reach for a pattern when
+  you feel the pain it removes — not before.
 </Note>
 
-## What to expect here
+## Creational patterns
 
-- Creational: Factory, Builder, Singleton
-- Structural: Adapter, Decorator, Facade
-- Behavioral: Strategy, Observer, Command
+How objects get made.
+
+### Factory
+
+A function that returns a ready-to-use value, hiding which concrete type you got. Go has no constructors, so **every `NewX` function is already a factory** — the pattern only becomes interesting when the return type is an interface and the choice is dynamic.
+
+```go showLineNumbers title="internal/storage/storage.go"
+type Storage interface {
+    Save(ctx context.Context, key string, data []byte) error
+    Load(ctx context.Context, key string) ([]byte, error)
+}
+
+// The factory: caller says what it wants, not how to build it.
+func New(kind string, cfg Config) (Storage, error) {
+    switch kind {
+    case "s3":
+        return newS3Storage(cfg)
+    case "local":
+        return newLocalStorage(cfg.Dir)
+    case "memory":
+        return newMemoryStorage(), nil
+    default:
+        return nil, fmt.Errorf("unknown storage kind %q", kind)
+    }
+}
+```
+
+```go showLineNumbers
+// main.go — the concrete type is decided by config, not by code.
+store, err := storage.New(os.Getenv("STORAGE_KIND"), cfg)
+```
+
+This is the one place where returning an interface is right, despite the usual "accept interfaces, return structs" advice — the whole point is that the caller must not know the concrete type.
+
+### Builder → functional options
+
+The classic Builder chains method calls to assemble a complex object. Go's idiomatic equivalent is the **functional options pattern**, and it's genuinely better: it's variadic, so adding an option never breaks existing callers.
+
+The problem it solves — a constructor that keeps growing:
+
+```go showLineNumbers
+// The pain: every new setting breaks every caller.
+func NewServer(addr string, timeout time.Duration, maxConns int, tls bool) *Server
+```
+
+The fix:
+
+```go showLineNumbers title="internal/server/server.go"
+type Server struct {
+    addr     string
+    timeout  time.Duration
+    maxConns int
+    logger   *slog.Logger
+}
+
+type Option func(*Server)
+
+func WithTimeout(d time.Duration) Option {
+    return func(s *Server) { s.timeout = d }
+}
+
+func WithMaxConns(n int) Option {
+    return func(s *Server) { s.maxConns = n }
+}
+
+func WithLogger(l *slog.Logger) Option {
+    return func(s *Server) { s.logger = l }
+}
+
+func New(addr string, opts ...Option) *Server {
+    s := &Server{
+        addr:     addr,
+        timeout:  30 * time.Second,      // sensible defaults
+        maxConns: 100,
+        logger:   slog.Default(),
+    }
+    for _, opt := range opts {
+        opt(s)
+    }
+    return s
+}
+```
+
+```go showLineNumbers
+srv := server.New(":8080")                              // defaults are fine
+srv := server.New(":8080", server.WithTimeout(5*time.Second))
+srv := server.New(":8080",
+    server.WithTimeout(5*time.Second),
+    server.WithMaxConns(500),
+)
+```
+
+<Note title="Why this beats a config struct" type="success">
+  A `Config` struct is the other common answer, and it's fine. Options win on two things: a
+  zero-value field is indistinguishable from "not set" in a struct (was `Timeout: 0` deliberate?),
+  and options can validate or compute — `WithTLS(certFile)` can load the cert and return an error.
+  Use a config struct for 10+ settings that all come from a file; use options for a library API.
+</Note>
+
+### Singleton
+
+One instance, shared. In Go, use `sync.Once` — it's safe under concurrency and lazy:
+
+```go showLineNumbers
+var (
+    poolOnce sync.Once
+    pool     *pgxpool.Pool
+)
+
+func Pool() *pgxpool.Pool {
+    poolOnce.Do(func() {
+        pool = mustConnect()
+    })
+    return pool
+}
+```
+
+<Note title="Prefer passing the dependency" type="danger">
+  Singletons are global state wearing a hat. They make tests order-dependent (you can't swap the
+  pool per test), hide dependencies (nothing in a function signature says it touches the
+  database), and turn into a bottleneck for parallel tests.
+
+  Create the thing once in `main.go` and **pass it down** instead. Reserve `sync.Once` for genuine
+  process-wide resources like a metrics registry.
+</Note>
+
+## Structural patterns
+
+How pieces fit together.
+
+### Adapter
+
+Make an existing type satisfy an interface it wasn't written for. Because Go interfaces are satisfied implicitly, an adapter is usually a thin wrapper struct — or sometimes nothing at all.
+
+```go showLineNumbers
+// We need this. A third-party client has SendMail(to, subj, body string) error.
+type Notifier interface {
+    Notify(ctx context.Context, userID, message string) error
+}
+
+// The adapter: bridges the gap without touching either side.
+type EmailNotifier struct {
+    client *sendgrid.Client
+    users  UserLookup
+}
+
+func (n *EmailNotifier) Notify(ctx context.Context, userID, message string) error {
+    email, err := n.users.EmailFor(ctx, userID)
+    if err != nil {
+        return fmt.Errorf("looking up email for %s: %w", userID, err)
+    }
+    return n.client.SendMail(email, "Notification", message)
+}
+```
+
+The standard library uses the trick constantly — `http.HandlerFunc` is an adapter that turns a plain function into an `http.Handler`:
+
+```go showLineNumbers
+type HandlerFunc func(ResponseWriter, *Request)
+
+func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
+    f(w, r)                    // the entire adapter
+}
+```
+
+### Decorator
+
+Wrap something in a thing with the same interface, adding behaviour. This is how **middleware** works, and it's probably the pattern you'll use most in a Go backend.
+
+```go showLineNumbers title="internal/httpapi/middleware.go"
+func WithLogging(next http.Handler, log *slog.Logger) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        next.ServeHTTP(w, r)
+        log.Info("request",
+            "method", r.Method,
+            "path", r.URL.Path,
+            "duration", time.Since(start))
+    })
+}
+
+func WithAuth(next http.Handler, verify TokenVerifier) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        claims, err := verify(r.Header.Get("Authorization"))
+        if err != nil {
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return                                  // stop the chain
+        }
+        ctx := context.WithValue(r.Context(), userKey, claims.UserID)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+```
+
+```go showLineNumbers
+// Compose them. Each layer is independently testable.
+handler := WithLogging(WithAuth(mux, verify), logger)
+```
+
+<Mermaid chart="graph LR
+  REQ[Request] --> L[WithLogging]
+  L --> A[WithAuth]
+  A --> M[mux / handler]
+  M --> A2[WithAuth returns]
+  A2 --> L2[WithLogging logs duration]
+  L2 --> RES[Response]" />
+
+The same shape works outside HTTP — a `Store` decorator that adds caching or retries:
+
+```go showLineNumbers
+type CachedStore struct {
+    inner Store                  // same interface
+    cache *lru.Cache
+}
+
+func (c *CachedStore) GetByID(ctx context.Context, id int64) (*User, error) {
+    if u, ok := c.cache.Get(id); ok {
+        return u.(*User), nil
+    }
+    u, err := c.inner.GetByID(ctx, id)
+    if err != nil {
+        return nil, err
+    }
+    c.cache.Add(id, u)
+    return u, nil
+}
+```
+
+Nothing that uses `Store` changes. That's the whole point.
+
+### Facade
+
+One simple entry point over several messy subsystems. Useful when a workflow touches four services and every caller would otherwise have to know all four.
+
+```go showLineNumbers
+// Facade: callers just say "check out". They don't know about
+// payments, inventory, email, or the order of operations.
+type CheckoutService struct {
+    orders    OrderStore
+    payments  PaymentGateway
+    inventory InventoryService
+    email     Notifier
+}
+
+func (c *CheckoutService) Checkout(ctx context.Context, cart *Cart) (*Order, error) {
+    if err := c.inventory.Reserve(ctx, cart.Items); err != nil {
+        return nil, fmt.Errorf("reserving stock: %w", err)
+    }
+    charge, err := c.payments.Charge(ctx, cart.UserID, cart.Total())
+    if err != nil {
+        c.inventory.Release(ctx, cart.Items)        // compensate
+        return nil, fmt.Errorf("charging: %w", err)
+    }
+    order, err := c.orders.Create(ctx, cart, charge.ID)
+    if err != nil {
+        return nil, fmt.Errorf("creating order: %w", err)
+    }
+    c.email.Notify(ctx, cart.UserID, "Order confirmed")
+    return order, nil
+}
+```
+
+The risk is that a facade quietly becomes a god object. Keep it to orchestration — sequencing calls and handling failure — and push actual rules down into the subsystems.
+
+## Behavioral patterns
+
+How pieces talk to each other.
+
+### Strategy
+
+Swap an algorithm at runtime. In Go this is *just an interface*, which is why it barely feels like a pattern.
+
+```go showLineNumbers title="internal/payment/payment.go"
+type Method interface {
+    Charge(ctx context.Context, amountCents int64) (*Receipt, error)
+    Name() string
+}
+
+type StripeMethod struct{ client *stripe.Client }
+type PayPalMethod struct{ client *paypal.Client }
+type PromptPayMethod struct{ client *promptpay.Client }
+
+// The context doesn't care which one it holds.
+type Processor struct {
+    methods map[string]Method
+}
+
+func (p *Processor) Pay(ctx context.Context, method string, amount int64) (*Receipt, error) {
+    m, ok := p.methods[method]
+    if !ok {
+        return nil, fmt.Errorf("unsupported payment method %q", method)
+    }
+    return m.Charge(ctx, amount)
+}
+```
+
+Adding a fourth provider means adding one file and one map entry. Nothing existing changes — that's the Open/Closed Principle in practice, covered on the [SOLID Principles](/docs/solid-principles) page.
+
+When the strategy has exactly one method, skip the interface and use a **function type**:
+
+```go showLineNumbers
+type PricingRule func(order *Order) int64
+
+var rules = map[string]PricingRule{
+    "standard": func(o *Order) int64 { return o.Subtotal },
+    "member":   func(o *Order) int64 { return o.Subtotal * 90 / 100 },
+    "bulk":     func(o *Order) int64 {
+        if o.Quantity >= 100 {
+            return o.Subtotal * 80 / 100
+        }
+        return o.Subtotal
+    },
+}
+```
+
+### Observer
+
+One thing changes; several others need to know. Within a single process, Go's channels make this natural:
+
+```go showLineNumbers
+type Event struct {
+    Name    string
+    Payload any
+}
+
+type Bus struct {
+    mu   sync.RWMutex
+    subs map[string][]chan Event
+}
+
+func (b *Bus) Subscribe(name string) <-chan Event {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    ch := make(chan Event, 16)              // buffered: a slow subscriber won't block the publisher
+    b.subs[name] = append(b.subs[name], ch)
+    return ch
+}
+
+func (b *Bus) Publish(e Event) {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    for _, ch := range b.subs[e.Name] {
+        select {
+        case ch <- e:
+        default:
+            slog.Warn("dropping event, subscriber full", "event", e.Name)
+        }
+    }
+}
+```
+
+<Note title="In-process observers don't survive a restart" type="warning">
+  This is fine for cache invalidation or metrics. It is **not** fine for anything that must
+  happen — if the process dies between publish and handle, the event is gone. Cross-process or
+  must-not-lose events belong on a real broker with a transactional outbox, as covered in
+  [Software Architecture Patterns](/docs/software-architecture-patterns).
+</Note>
+
+### Command
+
+Wrap a request as a value, so it can be queued, retried, logged, or undone. This is what a background job looks like:
+
+```go showLineNumbers
+type Command interface {
+    Execute(ctx context.Context) error
+    Name() string
+}
+
+type SendEmailCommand struct {
+    To      string
+    Subject string
+    Body    string
+    mailer  Mailer
+}
+
+func (c SendEmailCommand) Name() string { return "send_email" }
+func (c SendEmailCommand) Execute(ctx context.Context) error {
+    return c.mailer.Send(ctx, c.To, c.Subject, c.Body)
+}
+
+// A worker treats every job identically — retries, logging, and
+// metrics are written once, not per job type.
+func (w *Worker) Run(ctx context.Context, queue <-chan Command) {
+    for cmd := range queue {
+        if err := retry(ctx, 3, cmd.Execute); err != nil {
+            slog.Error("command failed", "name", cmd.Name(), "err", err)
+        }
+    }
+}
+```
+
+## A real example: notifications, three ways
+
+A notification system that started simple and grew — showing Strategy, Decorator, and Factory doing their jobs together.
+
+```go showLineNumbers title="internal/notify/notify.go"
+package notify
+
+// Strategy: each channel is one implementation.
+type Sender interface {
+    Send(ctx context.Context, to, message string) error
+}
+
+type EmailSender struct{ /* ... */ }
+type SMSSender struct{ /* ... */ }
+type SlackSender struct{ /* ... */ }
+
+// Decorator: retries, wrapping any Sender.
+type RetrySender struct {
+    inner    Sender
+    attempts int
+}
+
+func (r RetrySender) Send(ctx context.Context, to, msg string) error {
+    var err error
+    for i := 0; i < r.attempts; i++ {
+        if err = r.inner.Send(ctx, to, msg); err == nil {
+            return nil
+        }
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-time.After(time.Duration(1<<i) * time.Second):   // backoff
+        }
+    }
+    return fmt.Errorf("after %d attempts: %w", r.attempts, err)
+}
+
+// Decorator: metrics, also wrapping any Sender.
+type MeteredSender struct {
+    inner Sender
+    kind  string
+}
+
+func (m MeteredSender) Send(ctx context.Context, to, msg string) error {
+    start := time.Now()
+    err := m.inner.Send(ctx, to, msg)
+    sendDuration.WithLabelValues(m.kind, statusOf(err)).Observe(time.Since(start).Seconds())
+    return err
+}
+
+// Factory: assemble the stack from config.
+func NewSender(kind string, cfg Config) (Sender, error) {
+    var base Sender
+    switch kind {
+    case "email":
+        base = &EmailSender{ /* ... */ }
+    case "sms":
+        base = &SMSSender{ /* ... */ }
+    case "slack":
+        base = &SlackSender{ /* ... */ }
+    default:
+        return nil, fmt.Errorf("unknown notifier %q", kind)
+    }
+    return MeteredSender{inner: RetrySender{inner: base, attempts: 3}, kind: kind}, nil
+}
+```
+
+Every piece is independently testable, retries and metrics are written once rather than three times, and adding a fourth channel touches one `switch` case. No inheritance, no framework — just interfaces and structs.
+
+## Best practices
+
+- **Let patterns emerge.** Write the straightforward version first; refactor toward a pattern when duplication or rigidity actually shows up.
+- **Prefer composition over inheritance** — Go gives you no choice, which turns out to be a feature.
+- **A one-method interface is often better as a `func` type.** Fewer types to declare, and closures come free.
+- **Return concrete types, accept interfaces** — except from a Factory, where hiding the concrete type is the point.
+- **Avoid Singletons.** Wire dependencies in `main.go` and pass them down.
+- **Decorators must not change the interface.** If the wrapper needs an extra method, it isn't a decorator.
+- **Don't name types after patterns.** `RetrySender` says what it does; `SenderDecoratorImpl` doesn't.
+
+<CardGrid>
+  <Card
+    title="SOLID Principles →"
+    href="/docs/solid-principles"
+    description="The five design principles behind most of these patterns, applied to Go."
+  />
+</CardGrid>

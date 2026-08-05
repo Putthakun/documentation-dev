@@ -1,15 +1,339 @@
 ---
 title: Software Architecture Patterns
-description: Common architectural styles for backend systems.
+description: Common architectural styles for backend systems — layered, hexagonal, event-driven, and the monolith vs microservices decision.
+keywords: ["software architecture", "layered architecture", "hexagonal architecture", "clean architecture", "ports and adapters", "event-driven", "monolith", "microservices"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
+## What an architectural pattern is
+
+A **design pattern** solves a problem inside one file or package. An **architectural pattern** decides how the whole system is split up: what the top-level pieces are, which direction dependencies point, and where the boundaries sit.
+
+You only get to make this decision cheaply once — at the start. Changing a design pattern is an afternoon; changing an architecture is a quarter. That asymmetry is the reason it's worth thinking about deliberately even on a small service.
+
+The useful question is never "which pattern is best?" but **"which forces does this system actually face?"** — team size, rate of change, deployment constraints, and how long the thing has to live.
+
+## Layered (n-tier) architecture
+
+The default, and the right starting point for most services. Code is split into horizontal layers, and **dependencies only point downward**.
+
+<Mermaid chart="graph TD
+  H[Handler / Transport<br/>HTTP, gRPC, CLI] --> S[Service / Business logic]
+  S --> R[Repository / Data access]
+  R --> D[(PostgreSQL)]" />
+
+In Go this maps directly onto packages:
+
+<FileTree>
+  <Folder name="cmd" defaultOpen>
+    <Folder name="api">
+      <File name="main.go" />
+    </Folder>
+  </Folder>
+  <Folder name="internal" defaultOpen>
+    <Folder name="handler">
+      <File name="user.go" />
+    </Folder>
+    <Folder name="service">
+      <File name="user.go" />
+    </Folder>
+    <Folder name="repository">
+      <File name="user_postgres.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+Each layer has one job:
+
+| Layer | Responsible for | Must not know about |
+|---|---|---|
+| Handler | Decoding requests, validating input shape, writing responses and status codes | SQL, business rules |
+| Service | Business rules, orchestration, transactions | HTTP status codes, `*http.Request` |
+| Repository | Talking to the database, mapping rows to structs | Business rules |
+
+```go showLineNumbers title="internal/handler/user.go"
+func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
+    id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+    if err != nil {
+        http.Error(w, "invalid id", http.StatusBadRequest)
+        return
+    }
+
+    user, err := h.svc.GetUser(r.Context(), id)      // hands off to the service
+    if errors.Is(err, service.ErrUserNotFound) {
+        http.Error(w, "not found", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        http.Error(w, "internal error", http.StatusInternalServerError)
+        return
+    }
+
+    json.NewEncoder(w).Encode(user)
+}
+```
+
+<Note title="The layer boundary that actually matters" type="success">
+  The one rule worth defending is that **`net/http` types never reach the service layer**. If
+  `GetUser` takes an `*http.Request`, you can no longer call it from a CLI, a cron job, or a
+  test without constructing a fake request. Pass `context.Context` and plain values instead.
 </Note>
 
-## What to expect here
+**When it breaks down:** everything ends up depending on the database, because the repository is at the bottom. Swapping PostgreSQL for something else, or testing the service without a database, becomes painful. That's the problem the next pattern solves.
 
-- Layered (n-tier) architecture
-- Hexagonal / Clean Architecture
-- Event-driven architecture
-- Monolith vs microservices trade-offs
+## Hexagonal architecture (ports & adapters)
+
+Also called Clean Architecture. Same idea as layering, but the dependency arrows are **inverted at the edges**: the core business logic sits in the middle and depends on nothing external. Everything outside — HTTP, PostgreSQL, Stripe, Kafka — plugs into it.
+
+<Mermaid chart="graph LR
+  HTTP[HTTP handler] --> P1[Port: UserService]
+  CLI[CLI command] --> P1
+  P1 --> CORE[Domain core<br/>business rules]
+  CORE --> P2[Port: UserStore interface]
+  P2 --> PG[Adapter: Postgres]
+  P2 --> MEM[Adapter: in-memory fake]" />
+
+A **port** is an interface. An **adapter** is a concrete implementation of it. In Go this is almost free, because interfaces are satisfied implicitly and belong to the consumer:
+
+```go showLineNumbers title="internal/user/service.go"
+package user
+
+// Port: the core declares only what it needs. No import of pgx anywhere here.
+type Store interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+    Create(ctx context.Context, u *User) error
+}
+
+type Service struct {
+    store Store
+}
+
+func NewService(store Store) *Service {
+    return &Service{store: store}
+}
+
+func (s *Service) Register(ctx context.Context, email, name string) (*User, error) {
+    if !strings.Contains(email, "@") {
+        return nil, ErrInvalidEmail        // a business rule, not an HTTP concern
+    }
+    u := &User{Email: email, Name: name}
+    if err := s.store.Create(ctx, u); err != nil {
+        return nil, fmt.Errorf("creating user: %w", err)
+    }
+    return u, nil
+}
+```
+
+```go showLineNumbers title="internal/postgres/user.go"
+package postgres
+
+// Adapter: knows about pgx, satisfies user.Store implicitly.
+type UserStore struct{ pool *pgxpool.Pool }
+
+func (s *UserStore) GetByID(ctx context.Context, id int64) (*user.User, error) {
+    // ... pgx query
+}
+```
+
+The wiring happens once, in `main.go`:
+
+```go showLineNumbers title="cmd/api/main.go"
+pool, err := db.New(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+store := postgres.NewUserStore(pool)       // pick the adapter
+svc := user.NewService(store)              // inject it into the core
+handler := httpapi.NewUserHandler(svc)     // drive the core from HTTP
+```
+
+The payoff is concrete: testing `Service` needs a struct with two methods, not a database.
+
+```go showLineNumbers
+type fakeStore struct{ users map[int64]*user.User }
+
+func (f *fakeStore) Create(ctx context.Context, u *user.User) error {
+    f.users[u.ID] = u
+    return nil
+}
+// ... and a real unit test, no Docker required
+```
+
+<Note title="Don't build the full hexagon on day one" type="warning">
+  Hexagonal architecture has a real cost: more packages, more interfaces, more indirection to
+  read through. On a service with one datastore and no plans to change it, layered architecture
+  plus one `Store` interface gets you 80% of the benefit. Introduce a port when you have a
+  second implementation or a test that needs a fake — not before. See
+  [SOLID Principles](/docs/solid-principles) for the underlying rule.
+</Note>
+
+## Event-driven architecture
+
+Instead of service A calling service B directly, A **publishes an event** and doesn't care who consumes it.
+
+<Mermaid chart="graph LR
+  O[Order service] -->|OrderPlaced| B[(Message broker<br/>Kafka / NATS / SQS)]
+  B --> E[Email service]
+  B --> I[Inventory service]
+  B --> A[Analytics service]" />
+
+Compare the two shapes:
+
+<Tabs defaultValue="direct" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="direct">Direct calls</TabsTrigger>
+    <TabsTrigger value="events">Event-driven</TabsTrigger>
+  </TabsList>
+  <TabsContent value="direct">
+```go showLineNumbers
+func (s *OrderService) Place(ctx context.Context, o *Order) error {
+    if err := s.store.Save(ctx, o); err != nil {
+        return err
+    }
+    // Every new consumer means editing this function.
+    if err := s.email.SendConfirmation(ctx, o); err != nil {
+        return err                       // an email outage now fails the order
+    }
+    if err := s.inventory.Reserve(ctx, o); err != nil {
+        return err
+    }
+    return nil
+}
+```
+  </TabsContent>
+  <TabsContent value="events">
+```go showLineNumbers
+func (s *OrderService) Place(ctx context.Context, o *Order) error {
+    if err := s.store.Save(ctx, o); err != nil {
+        return err
+    }
+    // Publish once. Consumers subscribe independently.
+    return s.events.Publish(ctx, OrderPlaced{
+        OrderID: o.ID,
+        UserID:  o.UserID,
+        Total:   o.Total,
+    })
+}
+```
+  </TabsContent>
+</Tabs>
+
+**What you gain:** the order service stops knowing about email and inventory. Adding an analytics consumer requires zero changes to it. A slow email provider no longer slows down checkout.
+
+**What you pay:** the system becomes eventually consistent and much harder to reason about. "Why didn't this user get an email?" now spans three services and a broker. You need idempotent consumers, because at-least-once delivery means events *will* arrive twice.
+
+<Note title="Publishing and saving are not atomic" type="danger">
+  In the code above, if `store.Save` succeeds and `events.Publish` then fails, the order exists
+  but nothing downstream knows. The database transaction and the broker are two separate systems
+  — a normal transaction can't cover both.
+
+  The standard fix is the **transactional outbox**: write the event into an `outbox` table in the
+  *same* transaction as the order, and have a separate process publish rows from that table.
+  Don't reach for events until you're ready to handle this.
+</Note>
+
+## Monolith vs microservices
+
+The decision people get wrong most often, usually in the same direction.
+
+| | Modular monolith | Microservices |
+|---|---|---|
+| Deployment | One artifact | One per service |
+| Calls between modules | Function calls — fast, type-checked, transactional | Network calls — can fail, time out, need retries |
+| Data consistency | One database, real transactions | Distributed, eventually consistent |
+| Debugging | One stack trace | Distributed tracing required |
+| Scaling | Whole app together | Per service |
+| Team fit | One team, or a few | Many teams needing independent deploys |
+| Real cost | Discipline to keep boundaries | Infra, observability, on-call, CI/CD |
+
+<Note title="Start with a modular monolith" type="success">
+  Microservices solve an **organizational** problem — letting many teams deploy without
+  coordinating — by paying a large technical price. If you don't have that organizational
+  problem, you're paying the price for nothing.
+
+  A monolith with clean internal package boundaries gives you most of the modularity and none of
+  the network. And it's far easier to split a well-organized monolith later than to merge
+  microservices that were drawn along the wrong lines.
+</Note>
+
+## A real example: putting it together
+
+A small Go order service, hexagonal, single deployable:
+
+<FileTree>
+  <Folder name="cmd" defaultOpen>
+    <Folder name="api">
+      <File name="main.go" />
+    </Folder>
+  </Folder>
+  <Folder name="internal" defaultOpen>
+    <Folder name="order" defaultOpen>
+      <File name="order.go" />
+      <File name="service.go" />
+      <File name="errors.go" />
+    </Folder>
+    <Folder name="postgres">
+      <File name="order_store.go" />
+    </Folder>
+    <Folder name="httpapi">
+      <File name="order_handler.go" />
+      <File name="router.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+```go showLineNumbers title="internal/order/service.go"
+package order
+
+type Store interface {
+    Save(ctx context.Context, o *Order) error
+    GetByID(ctx context.Context, id int64) (*Order, error)
+}
+
+type Publisher interface {
+    Publish(ctx context.Context, event any) error
+}
+
+type Service struct {
+    store Store
+    events Publisher
+}
+
+func (s *Service) Place(ctx context.Context, userID, productID int64, qty int) (*Order, error) {
+    if qty <= 0 {
+        return nil, ErrInvalidQuantity
+    }
+
+    o := &Order{UserID: userID, ProductID: productID, Quantity: qty, Status: StatusPending}
+    if err := s.store.Save(ctx, o); err != nil {
+        return nil, fmt.Errorf("saving order: %w", err)
+    }
+
+    if err := s.events.Publish(ctx, OrderPlaced{OrderID: o.ID}); err != nil {
+        // Log, don't fail — the order is already committed.
+        slog.Error("publishing OrderPlaced", "order_id", o.ID, "err", err)
+    }
+    return o, nil
+}
+```
+
+Note what `internal/order` imports: nothing from `net/http`, nothing from `pgx`. That package is the core. Everything else is an adapter around it, and every one of them is replaceable without touching a business rule.
+
+## Best practices
+
+- **Start layered, extract ports when you need them.** Architecture you don't need is cost without benefit.
+- **Keep dependencies pointing one way.** Handler → service → repository. Never a repository importing a handler.
+- **Never let transport types cross a boundary.** No `*http.Request` in a service, no `pgx.Rows` in a handler.
+- **Define interfaces in the consuming package**, small and per-use — this is what makes ports cheap in Go ([Interfaces](/docs/golang-fundamentals/interfaces)).
+- **Wire dependencies in `main.go`**, not with global state or `init()`.
+- **Prefer a modular monolith** until an organizational reason forces services apart.
+- **Don't publish events until you've solved the outbox problem.**
+- **Write the boundary down.** An architecture nobody agreed on decays into no architecture within a few months.
+
+<CardGrid>
+  <Card
+    title="Design Patterns →"
+    href="/docs/design-patterns"
+    description="Creational, structural, and behavioral patterns, written the way Go actually does them."
+  />
+</CardGrid>

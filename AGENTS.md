@@ -73,12 +73,20 @@ earlier — cover the mechanics and link forward instead (e.g. Golang Fundamenta
 
 ## Section status
 
-Written in full (10 sub-pages each): **Git Workflow**, **Golang Fundamentals**,
-**SQL / PostgreSQL Basics**.
+Written in full (10 sub-pages each, nested under a parent with `items:`): **Git Workflow**,
+**Golang Fundamentals**, **SQL / PostgreSQL Basics**.
 
-Still placeholder stubs: Architecture & Design (3), Golang Best Practices (4), Database (3),
-DevOps & Infrastructure (5), Real-world Applications (3). Stubs use a `<Note type="warning">`
-work-in-progress block plus a "What to expect here" bullet list.
+Written in full (3 flat top-level pages, no `items:` nesting): **Architecture & Design** —
+Software Architecture Patterns, Design Patterns, SOLID Principles.
+
+Still placeholder stubs: Golang Best Practices (4), Database (3), DevOps & Infrastructure (5),
+Real-world Applications (3). Stubs use a `<Note type="warning">` work-in-progress block plus a
+"What to expect here" bullet list.
+
+Note the two shapes: the three Foundations sections nest sub-pages under one parent entry, while
+every later section is a flat list of top-level pages sharing one `heading:`. Keep whichever
+shape a section already has — converting between them means restructuring
+`settings/documents.ts` and moving folders.
 
 ## Commands
 
