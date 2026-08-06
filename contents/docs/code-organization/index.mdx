@@ -4,13 +4,372 @@ description: How to structure a Go project as it grows.
 keywords: ["go project layout", "package structure", "internal package", "circular dependency", "cmd"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
+## Layout is a late decision
+
+The most common mistake with a new Go service is opening with a twelve-directory skeleton copied
+from a blog post. You end up maintaining boundaries that don't correspond to anything real yet.
+
+Go projects are unusually cheap to reorganize: packages are directories, imports are paths, and
+`gopls` renames both for you. So the honest strategy is to **start small and split when a specific
+pain appears**. This page is about recognizing that pain and knowing which split relieves it.
+
+The mechanics of packages themselves — naming, `internal/`, `go mod` — are covered in
+[Packages & Modules](/docs/golang-fundamentals/packages-modules). The *architectural* question of
+which direction dependencies point is [Software Architecture Patterns](/docs/software-architecture-patterns).
+This page is the practical middle: where the files actually go.
+
+## The three shapes a service passes through
+
+Almost every Go backend moves through these in order. Each move should be triggered by a problem,
+not a calendar.
+
+| Shape | Good until | The pain that ends it |
+|---|---|---|
+| One package | ~1,000 lines | You can't find anything, and everything can call everything |
+| Packages by layer | ~10,000 lines | Adding one feature means editing four packages |
+| Packages by domain | A long time | Two domains need to be separate services |
+
+### Shape 1 — one package
+
+For a small service, a handful of files in `main` is genuinely correct:
+
+<FileTree>
+  <Folder name="orders-api" defaultOpen>
+    <File name="main.go" />
+    <File name="handler.go" />
+    <File name="store.go" />
+    <File name="order.go" />
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+Everything is in one package, so there are no import decisions to make and no cycles possible.
+Files are still a real organizing tool — `handler.go` and `store.go` separate concerns for a human
+reader even when the compiler sees one package.
+
+<Note title="Don't skip this stage on a small service" type="success">
+  A 600-line service in one package is easier to read, easier to change, and easier to delete than
+  the same code spread over nine directories. If you can hold the whole thing in your head, that's
+  a feature — protect it until the code genuinely outgrows it.
 </Note>
 
-## What to expect here
+### Shape 2 — split by layer
 
-- Standard Go project layout conventions
-- Package boundaries and naming
-- Avoiding circular dependencies
-- Internal vs exported packages (`internal/`)
+The first split most services need. Each package holds one *kind* of thing:
+
+<FileTree>
+  <Folder name="internal" defaultOpen>
+    <Folder name="handler">
+      <File name="order.go" />
+      <File name="user.go" />
+    </Folder>
+    <Folder name="service">
+      <File name="order.go" />
+      <File name="user.go" />
+    </Folder>
+    <Folder name="repository">
+      <File name="order_postgres.go" />
+      <File name="user_postgres.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+This buys you an enforced rule: `repository` cannot import `handler`, so SQL can never leak
+upward. That's real value, and for many services it's where the story ends.
+
+Its limit shows up when you add a feature. "Add order cancellation" means touching
+`handler/order.go`, `service/order.go`, and `repository/order_postgres.go` — three packages, one
+concept. The code that changes together doesn't live together.
+
+### Shape 3 — split by domain
+
+Reorganize around what the code is *about* rather than what it *is*:
+
+<FileTree>
+  <Folder name="internal" defaultOpen>
+    <Folder name="order" defaultOpen>
+      <File name="order.go" />
+      <File name="service.go" />
+      <File name="postgres.go" />
+      <File name="http.go" />
+    </Folder>
+    <Folder name="user">
+      <File name="user.go" />
+      <File name="service.go" />
+      <File name="postgres.go" />
+      <File name="http.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+Now order cancellation is one directory. The package boundary also becomes meaningful: `user` can
+expose a small API to `order` and hide the rest, which the layered shape can't do because
+everything in `service` is one package.
+
+<Note title="This is the shape that survives" type="success">
+  Domain packages are also the natural seam if you ever split a service out — `internal/order`
+  becomes its own module with a much smaller diff than extracting one layer from three packages.
+  You don't have to start here, but it's usually where you end up.
+</Note>
+
+## Naming
+
+One rule with outsized impact: **name a package for what it provides, not what it contains.**
+`payment`, `auth`, `ratelimit` — never `utils`, `common`, `helpers`, or `models`. A package named
+for a category has no reason to reject any code, so it grows forever and everything imports it.
+[Packages & Modules](/docs/golang-fundamentals/packages-modules) covers this and the
+`internal/` rules in full.
+
+## Breaking an import cycle
+
+Go refuses to compile circular imports. This is a feature — it's the compiler telling you a
+boundary is wrong — but the first time it happens it's genuinely confusing.
+
+The classic version: `order` needs a user's email to send a confirmation, and `user` needs a
+user's order count to decide their tier. Each imports the other, and the build fails:
+
+<Mermaid chart="graph LR
+  O1[package order] -->|imports| U1[package user]
+  U1 -->|imports| O1" />
+
+The fix is not a third `shared` package — that just moves the problem and creates the grab-bag
+you were warned about. Instead, **the consumer declares an interface for what it needs**, and the
+provider satisfies it implicitly:
+
+<Mermaid chart="graph TD
+  M[main.go] -->|wires both| O2[package order]
+  O2 --> I[UserFinder interface<br/>declared in order]
+  U2[package user] -.->|satisfies| I" />
+
+```go showLineNumbers title="internal/order/service.go"
+package order
+
+// order does NOT import user. It states its requirement locally.
+type UserFinder interface {
+    EmailFor(ctx context.Context, userID int64) (string, error)
+}
+
+type Service struct {
+    users UserFinder
+    store Store
+}
+```
+
+```go showLineNumbers title="internal/user/service.go"
+package user
+
+// user knows nothing about order. It just has the method.
+func (s *Service) EmailFor(ctx context.Context, userID int64) (string, error) {
+    u, err := s.store.GetByID(ctx, userID)
+    if err != nil {
+        return "", err
+    }
+    return u.Email, nil
+}
+```
+
+```go showLineNumbers title="cmd/api/main.go"
+userSvc := user.NewService(userStore)
+orderSvc := order.NewService(orderStore, userSvc)   // satisfies order.UserFinder
+```
+
+The arrow now runs one way, both packages compile alone, and `order` is testable with a
+three-line fake. This is [Dependency Inversion](/docs/solid-principles) doing real work.
+
+<Note title="When a cycle means something else" type="warning">
+  Two other causes worth recognizing. If the two packages genuinely share a *type* (not behaviour)
+  — an `Order` struct both need — that type may belong in its own small package with no
+  dependencies of its own. And if two packages import each other constantly in both directions,
+  they may simply be one package that you split too early. Merging them back is a valid fix.
+</Note>
+
+## The composition root
+
+Every dependency in the program gets constructed in exactly one place: `main`. Nothing else
+creates a database pool, reads an environment variable, or decides which implementation to use.
+
+```go showLineNumbers title="cmd/api/main.go"
+func main() {
+    if err := run(); err != nil {
+        slog.Error("startup failed", "err", err)
+        os.Exit(1)
+    }
+}
+
+func run() error {
+    ctx := context.Background()
+
+    cfg, err := config.Load()
+    if err != nil {
+        return fmt.Errorf("loading config: %w", err)
+    }
+
+    pool, err := db.New(ctx, cfg.DatabaseURL)
+    if err != nil {
+        return fmt.Errorf("connecting to database: %w", err)
+    }
+    defer pool.Close()
+
+    // Wiring: adapters first, then the services that use them.
+    userStore := postgres.NewUserStore(pool)
+    orderStore := postgres.NewOrderStore(pool)
+
+    userSvc := user.NewService(userStore)
+    orderSvc := order.NewService(orderStore, userSvc)
+
+    srv := &http.Server{
+        Addr:    cfg.Addr,
+        Handler: httpapi.NewRouter(userSvc, orderSvc),
+    }
+    return srv.ListenAndServe()
+}
+```
+
+<Note title="Why run() error instead of everything in main()" type="success">
+  `main` can't return an error and `os.Exit` skips every `defer`. Putting the real work in
+  `run() error` means `defer pool.Close()` actually runs, errors get one consistent exit path,
+  and the whole startup becomes testable. It's a small habit that pays off the first time you
+  need to debug a boot failure.
+</Note>
+
+## Config
+
+Load configuration once, in `main`, into a struct — never call `os.Getenv` deep inside a service.
+A service that reads the environment can't be tested with different values and hides its
+requirements from the reader.
+
+```go showLineNumbers title="internal/config/config.go"
+package config
+
+type Config struct {
+    Addr        string
+    DatabaseURL string
+    LogLevel    string
+}
+
+func Load() (Config, error) {
+    cfg := Config{
+        Addr:     envOr("ADDR", ":8080"),
+        LogLevel: envOr("LOG_LEVEL", "info"),
+    }
+
+    cfg.DatabaseURL = os.Getenv("DATABASE_URL")
+    if cfg.DatabaseURL == "" {
+        return Config{}, errors.New("DATABASE_URL is required")
+    }
+    return cfg, nil
+}
+
+func envOr(key, fallback string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return fallback
+}
+```
+
+Failing at startup on a missing required variable is correct — far better than a nil pointer
+twenty minutes into production traffic.
+
+## Where the non-Go files go
+
+<FileTree>
+  <Folder name="orders-api" defaultOpen>
+    <Folder name="cmd">
+      <Folder name="api">
+        <File name="main.go" />
+      </Folder>
+      <Folder name="migrate">
+        <File name="main.go" />
+      </Folder>
+    </Folder>
+    <Folder name="internal" />
+    <Folder name="migrations">
+      <File name="0001_create_users.up.sql" />
+      <File name="0001_create_users.down.sql" />
+    </Folder>
+    <Folder name="testdata">
+      <File name="order_response.golden.json" />
+    </Folder>
+    <File name="Makefile" />
+    <File name="Dockerfile" />
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+Two conventions the tooling actually knows about: `cmd/<name>/main.go` gives you one binary per
+subdirectory, and **`testdata/` is ignored by the Go tool** — it's the standard home for fixtures
+and golden files, covered in [Testing](/docs/testing).
+
+## A real example
+
+A mature layout, with the reason for each boundary rather than a rule:
+
+<FileTree>
+  <Folder name="orders-api" defaultOpen>
+    <Folder name="cmd" defaultOpen>
+      <Folder name="api">
+        <File name="main.go" />
+      </Folder>
+    </Folder>
+    <Folder name="internal" defaultOpen>
+      <Folder name="config">
+        <File name="config.go" />
+      </Folder>
+      <Folder name="order" defaultOpen>
+        <File name="order.go" />
+        <File name="service.go" />
+        <File name="service_test.go" />
+        <File name="errors.go" />
+      </Folder>
+      <Folder name="user">
+        <File name="user.go" />
+        <File name="service.go" />
+      </Folder>
+      <Folder name="postgres">
+        <File name="order_store.go" />
+        <File name="user_store.go" />
+      </Folder>
+      <Folder name="httpapi">
+        <File name="router.go" />
+        <File name="order_handler.go" />
+        <File name="middleware.go" />
+      </Folder>
+    </Folder>
+    <Folder name="migrations" />
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+- **`internal/order` and `internal/user`** are domains — the code that changes together.
+- **`internal/postgres`** is one package, not one per domain, because a single connection pool and
+  a shared set of scan helpers live there. It imports the domain packages; they never import it.
+- **`internal/httpapi`** owns everything that knows about HTTP: routing, status codes,
+  JSON shapes, middleware. No other package imports `net/http`.
+- **`internal/config`** is imported only by `main`.
+- **Tests sit beside the code they test**, in the same package, so they can reach unexported
+  functions.
+
+The shape of the dependency graph matters more than the directory names: `httpapi` → `order` →
+(interfaces it declares), with `postgres` and `main` pointing inward. Nothing points back out.
+
+## Best practices
+
+- **Start with one package.** Split when you feel a specific pain, not preemptively.
+- **Prefer domain packages over layer packages** once the service has more than one real concept.
+- **Never create `utils`, `common`, `helpers`, or `models`.** Name packages for what they provide.
+- **Break cycles with an interface in the consumer**, not with a shared package.
+- **Wire everything in `main`**, and put the body in `run() error` so `defer` works.
+- **Load config once at startup** into a struct; fail immediately if something required is missing.
+- **Keep `net/http` out of every package except the HTTP one**, and SQL out of every package
+  except the store.
+- **Let the import graph be the review**: if you can't draw it as a DAG on a whiteboard, the
+  layout is wrong regardless of how tidy the directories look.
+
+<CardGrid>
+  <Card
+    title="Error Handling →"
+    href="/docs/error-handling"
+    description="Custom error types, errors.As, and mapping domain errors to HTTP responses."
+  />
+</CardGrid>

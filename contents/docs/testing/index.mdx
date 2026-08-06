@@ -4,13 +4,396 @@ description: Writing effective tests in Go.
 keywords: ["golang testing", "table-driven tests", "test coverage", "integration test", "test double", "go test"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
+## Go's testing model
+
+There's no framework to choose. Tests are ordinary Go functions in a file ending `_test.go`, and
+`go test` runs them:
+
+```go showLineNumbers title="internal/order/total_test.go"
+package order
+
+import "testing"
+
+func TestTotal(t *testing.T) {
+    o := Order{Quantity: 3, UnitPrice: 500}
+
+    got := o.Total()
+
+    if got != 1500 {
+        t.Errorf("Total() = %d, want 1500", got)
+    }
+}
+```
+
+```bash showLineNumbers
+go test ./...              # everything
+go test ./internal/order   # one package
+go test -run TestTotal ./... # one test, by regex
+go test -v ./...           # show each test as it runs
+```
+
+Two failure verbs: `t.Errorf` records the failure and keeps going, `t.Fatalf` stops that test
+immediately. Use `Fatalf` when continuing would panic — a `nil` returned alongside an unexpected
+error — and `Errorf` otherwise, so one run reports every problem.
+
+<Note title="Test in the same package by default" type="success">
+  A file in `package order` can reach unexported functions; `package order_test` sees only the
+  exported API. Same-package is the pragmatic default. Reach for `_test` when you specifically want
+  to prove the public API is usable on its own, or to break an import cycle in the test itself.
 </Note>
 
-## What to expect here
+## Table-driven tests
 
-- Table-driven tests with `testing`
-- Mocking interfaces and dependency injection
-- Test coverage and `go test -cover`
-- Integration tests against a real database
+The default shape in Go. One test function, a slice of cases, `t.Run` for each:
+
+```go showLineNumbers title="internal/order/validate_test.go"
+func TestPlaceRequest_Validate(t *testing.T) {
+    tests := []struct {
+        name    string
+        req     PlaceRequest
+        wantErr error
+    }{
+        {
+            name: "valid",
+            req:  PlaceRequest{ProductID: 1, Quantity: 2},
+        },
+        {
+            name:    "zero quantity",
+            req:     PlaceRequest{ProductID: 1, Quantity: 0},
+            wantErr: ErrInvalidQuantity,
+        },
+        {
+            name:    "negative quantity",
+            req:     PlaceRequest{ProductID: 1, Quantity: -5},
+            wantErr: ErrInvalidQuantity,
+        },
+        {
+            name:    "missing product",
+            req:     PlaceRequest{Quantity: 2},
+            wantErr: ErrProductRequired,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            err := tt.req.Validate()
+
+            if !errors.Is(err, tt.wantErr) {
+                t.Errorf("Validate() error = %v, want %v", err, tt.wantErr)
+            }
+        })
+    }
+}
+```
+
+Adding a fifth case is one struct literal. `t.Run` gives each case its own name in the output, so
+a failure reads `--- FAIL: TestPlaceRequest_Validate/negative_quantity` and you know exactly which
+input broke without reading the code.
+
+<Note title="Write failure messages that don't need the source" type="success">
+  The convention is `got = %v, want %v`, including the inputs when they aren't obvious:
+
+  ```go
+  t.Errorf("Total(%d, %d) = %d, want %d", qty, price, got, want)
+  ```
+
+  A message like `t.Error("failed")` tells you nothing at 2 a.m. — you have to open the file and
+  reconstruct the case. The whole value of a test suite is what it tells you when it goes red.
+</Note>
+
+## Fakes over mocking libraries
+
+Because interfaces are satisfied implicitly and should be small
+([Interfaces](/docs/golang-fundamentals/interfaces),
+[SOLID Principles](/docs/solid-principles)), a test double is usually a struct with two methods —
+no library, no code generation, no DSL to learn.
+
+```go showLineNumbers title="internal/order/service_test.go"
+type fakeProductStore struct {
+    price int64
+    err   error
+}
+
+func (f fakeProductStore) PriceOf(ctx context.Context, id int64) (int64, error) {
+    return f.price, f.err
+}
+
+type fakeOrderStore struct {
+    created []*Order          // records what happened, for assertions
+}
+
+func (f *fakeOrderStore) Create(ctx context.Context, o *Order) error {
+    o.ID = int64(len(f.created) + 1)
+    f.created = append(f.created, o)
+    return nil
+}
+```
+
+```go showLineNumbers
+func TestService_Place(t *testing.T) {
+    orders := &fakeOrderStore{}
+    svc := NewService(fakeProductStore{price: 500}, orders, fakePayments{})
+
+    o, err := svc.Place(context.Background(), PlaceRequest{ProductID: 1, Quantity: 3})
+    if err != nil {
+        t.Fatalf("Place() error = %v", err)
+    }
+
+    if o.Total != 1500 {
+        t.Errorf("Total = %d, want 1500", o.Total)
+    }
+    if len(orders.created) != 1 {
+        t.Errorf("created %d orders, want 1", len(orders.created))
+    }
+}
+```
+
+To test a failure path, return an error from the fake — no `.On("PriceOf").Return(...)` incantation:
+
+```go showLineNumbers
+svc := NewService(fakeProductStore{err: errors.New("db down")}, orders, fakePayments{})
+```
+
+<Note title="If faking is hard, the design is the problem" type="warning">
+  Needing a mocking library usually means an interface is too big, or the code depends on a
+  concrete type it should be taking as a parameter. A test that requires elaborate setup is telling
+  you about the code under test, not about testing. Fix the seam — see
+  [Dependency Inversion](/docs/solid-principles).
+</Note>
+
+## Helpers, cleanup, and parallelism
+
+```go showLineNumbers
+// t.Helper() makes failures report the CALLER's line, not this function's.
+func mustPlace(t *testing.T, svc *Service, req PlaceRequest) *Order {
+    t.Helper()
+    o, err := svc.Place(context.Background(), req)
+    if err != nil {
+        t.Fatalf("Place(%+v) error = %v", req, err)
+    }
+    return o
+}
+
+// t.Cleanup runs after the test, even if it fails or calls Fatalf.
+func newTestServer(t *testing.T) *httptest.Server {
+    srv := httptest.NewServer(handler)
+    t.Cleanup(srv.Close)
+    return srv
+}
+```
+
+`t.Cleanup` is better than `defer` in a helper, because a `defer` inside the helper fires when the
+*helper* returns, not when the test ends.
+
+`t.Parallel()` runs tests concurrently — real speedup on I/O-bound suites, and it surfaces shared
+state you didn't know you had:
+
+```go showLineNumbers
+func TestSomething(t *testing.T) {
+    t.Parallel()
+    // ...
+}
+```
+
+<Note title="Parallel subtests need isolated fixtures" type="warning">
+  Parallel subtests that share one fake, one database row, or one temp file will interfere with
+  each other in ways that look like flakiness. Give each subtest its own fixture — construct the
+  fake inside the `t.Run` closure, not outside the loop.
+</Note>
+
+## Testing HTTP handlers
+
+`net/http/httptest` lets you exercise a handler with no network and no port:
+
+```go showLineNumbers title="internal/httpapi/order_handler_test.go"
+func TestOrderHandler_Create(t *testing.T) {
+    h := NewOrderHandler(&fakeService{})
+
+    body := strings.NewReader(`{"product_id":1,"quantity":3}`)
+    req := httptest.NewRequest(http.MethodPost, "/orders", body)
+    rec := httptest.NewRecorder()
+
+    h.Create(rec, req)
+
+    if rec.Code != http.StatusCreated {
+        t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
+    }
+
+    var got order.Order
+    if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+        t.Fatalf("decoding response: %v", err)
+    }
+    if got.Total != 1500 {
+        t.Errorf("Total = %d, want 1500", got.Total)
+    }
+}
+```
+
+This is the natural place to check the error mapping from
+[Error Handling](/docs/error-handling) — a table of `(service error → expected status)` covers the
+whole boundary in one test.
+
+## Golden files
+
+When the expected output is large — a rendered JSON response, a generated SQL migration — keep it
+in a file under `testdata/` instead of a string literal, and regenerate it with a flag:
+
+```go showLineNumbers
+var update = flag.Bool("update", false, "update golden files")
+
+func TestRenderInvoice(t *testing.T) {
+    got := RenderInvoice(sampleOrder)
+
+    golden := filepath.Join("testdata", "invoice.golden.json")
+    if *update {
+        if err := os.WriteFile(golden, got, 0o644); err != nil {
+            t.Fatal(err)
+        }
+    }
+
+    want, err := os.ReadFile(golden)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if !bytes.Equal(got, want) {
+        t.Errorf("output differs from %s (run: go test -update)", golden)
+    }
+}
+```
+
+`testdata/` is ignored by the Go tool, so anything in it is safe from the compiler. Review golden
+file diffs in code review like any other change — the point is that an unintended output change
+shows up as a diff instead of slipping through.
+
+## Coverage
+
+```bash showLineNumbers
+go test -cover ./...
+go test -coverprofile=cover.out ./...
+go tool cover -html=cover.out          # open an annotated view in the browser
+```
+
+The HTML view is the useful part: it shows *which lines* never ran. The percentage is much less
+useful than people treat it.
+
+<Note title="Coverage measures execution, not correctness" type="danger">
+  A test that calls every function and asserts nothing scores 100%. Coverage tells you what was
+  *run*, never whether the behaviour was *checked*.
+
+  Use it to find blind spots — an untested error branch, a whole file at 0% — not as a target.
+  Chasing a number produces tests written for the metric: assertions on trivia, tests for getters,
+  and mocks that verify the code calls the functions it obviously calls. Aim for every important
+  path tested, and let the number be whatever it is.
+</Note>
+
+## Integration tests against real PostgreSQL
+
+Unit tests with fakes prove your logic. They can't prove your SQL is valid, your schema matches, or
+your constraint behaves as expected. For that you need the real database — and mocking the driver
+would test only your assumptions about it.
+
+Keep them separate so the fast suite stays fast:
+
+```go showLineNumbers title="internal/postgres/order_store_test.go"
+func TestOrderStore_Create(t *testing.T) {
+    if testing.Short() {
+        t.Skip("skipping integration test")
+    }
+
+    pool := testPool(t)                       // connects, migrates, cleans up
+    store := NewOrderStore(pool)
+
+    o := &order.Order{UserID: 1, ProductID: 2, Quantity: 3}
+    if err := store.Create(context.Background(), o); err != nil {
+        t.Fatalf("Create() error = %v", err)
+    }
+    if o.ID == 0 {
+        t.Error("Create() did not set ID")
+    }
+
+    got, err := store.GetByID(context.Background(), o.ID)
+    if err != nil {
+        t.Fatalf("GetByID() error = %v", err)
+    }
+    if got.Quantity != 3 {
+        t.Errorf("Quantity = %d, want 3", got.Quantity)
+    }
+}
+```
+
+```go showLineNumbers title="internal/postgres/main_test.go"
+// testPool returns a pool against the test database and truncates
+// every table when the test finishes, so tests can't leak into each other.
+func testPool(t *testing.T) *pgxpool.Pool {
+    t.Helper()
+
+    url := os.Getenv("TEST_DATABASE_URL")
+    if url == "" {
+        t.Skip("TEST_DATABASE_URL not set")
+    }
+
+    pool, err := pgxpool.New(context.Background(), url)
+    if err != nil {
+        t.Fatalf("connecting: %v", err)
+    }
+
+    t.Cleanup(func() {
+        _, _ = pool.Exec(context.Background(),
+            `TRUNCATE orders, users, products RESTART IDENTITY CASCADE`)
+        pool.Close()
+    })
+    return pool
+}
+```
+
+```bash showLineNumbers
+docker run -d --name test-pg -e POSTGRES_PASSWORD=test -p 5433:5432 postgres:16
+export TEST_DATABASE_URL="postgres://postgres:test@localhost:5433/postgres"
+
+go test ./...              # everything, including integration
+go test -short ./...       # unit tests only — fast enough for save-on-write
+```
+
+<Note title="Truncate between tests, don't rely on ordering" type="warning">
+  A test that passes only when it runs after another one will fail the day someone adds a case or
+  runs with `-shuffle=on`. Reset state in `t.Cleanup`, and never assume an ID will be `1`. The
+  `RESTART IDENTITY CASCADE` above makes each test start from the same place.
+</Note>
+
+## A real example: the two halves together
+
+The same feature, tested at both levels:
+
+| | Unit test | Integration test |
+|---|---|---|
+| Lives in | `internal/order/service_test.go` | `internal/postgres/order_store_test.go` |
+| Dependencies | Hand-written fakes | Real PostgreSQL in Docker |
+| Proves | Discounts, validation, the order of operations | The SQL runs, constraints hold, scanning works |
+| Runtime | Microseconds | Tens of milliseconds |
+| Runs on | Every save | Every push |
+
+Most of your tests should be the first kind, and you should have enough of the second kind that
+"it compiles" never gets confused with "the query is correct". Splitting them by `-short` keeps
+both honest: the fast loop stays instant, and CI runs everything.
+
+## Best practices
+
+- **Table-driven with `t.Run`** is the default shape. Adding a case should be one line.
+- **Write failure messages as `got = %v, want %v`,** with inputs — readable without the source.
+- **Hand-write fakes.** If that's hard, fix the interface, don't add a mocking library.
+- **`t.Helper()` in every helper**, so failures point at the real line.
+- **`t.Cleanup` over `defer`** for anything a helper sets up.
+- **Test behaviour, not implementation.** Asserting which internal methods got called makes every
+  refactor a test rewrite.
+- **Use coverage to find untested branches**, never as a target.
+- **Integration-test your SQL** against real PostgreSQL, gated behind `-short`.
+- **Reset state in cleanup**; never let one test depend on another's leftovers.
+- **Run `go test -race ./...` in CI** ([Concurrency](/docs/concurrency)).
+
+<CardGrid>
+  <Card
+    title="PostgreSQL Advanced →"
+    href="/docs/postgresql-advanced"
+    description="Window functions, JSONB, CTEs, isolation levels, and query plans in depth."
+  />
+</CardGrid>

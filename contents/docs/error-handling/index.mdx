@@ -4,13 +4,365 @@ description: Idiomatic error handling in Go.
 keywords: ["golang error", "errors.Is", "errors.As", "custom error type", "sentinel error", "error wrapping"]
 ---
 
-<Note title="Work in progress" type="warning">
-  This page is a placeholder. Full content — what it is, how to use it, best practices, and real examples — is coming soon.
+## Beyond `if err != nil`
+
+[Errors: The Basics](/docs/golang-fundamentals/errors-basics) covered the model: errors are values,
+you wrap with `%w`, you compare with `errors.Is`, and you log once at the top. That's enough for a
+small program.
+
+This page is about the next problem: in a real service, an error crosses three or four layers
+before anyone sees it, and each layer needs something different from it. The database wants to say
+"unique violation", the service wants to say "that email is taken", and the HTTP handler needs to
+turn that into a `409` with a JSON body — without importing `pgconn`.
+
+Doing that well needs three things beyond the basics: **errors that carry data**, a rule for
+**where translation happens**, and a single **boundary** that turns errors into responses.
+
+## Errors that carry data
+
+A sentinel error carries only its identity. When the caller needs *details* — which field was
+invalid, which ID was missing, how long to wait before retrying — define a type.
+
+Any struct with an `Error() string` method is an error:
+
+```go showLineNumbers title="internal/order/errors.go"
+package order
+
+type ValidationError struct {
+    Field  string
+    Reason string
+}
+
+func (e *ValidationError) Error() string {
+    return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+
+type NotFoundError struct {
+    Resource string
+    ID       int64
+}
+
+func (e *NotFoundError) Error() string {
+    return fmt.Sprintf("%s %d not found", e.Resource, e.ID)
+}
+```
+
+```go showLineNumbers
+func (s *Service) Place(ctx context.Context, req PlaceRequest) (*Order, error) {
+    if req.Quantity <= 0 {
+        return nil, &ValidationError{Field: "quantity", Reason: "must be positive"}
+    }
+    // ...
+}
+```
+
+<Note title="Use a pointer receiver, return a pointer" type="warning">
+  Define `Error()` on `*ValidationError` and return `&ValidationError{...}`. If you mix the two —
+  method on the value, returned as a pointer, or vice versa — `errors.As` silently fails to match,
+  because `*T` and `T` are different types. Pick pointers for error types and stay consistent.
 </Note>
 
-## What to expect here
+## `errors.Is` vs `errors.As`
 
-- The `error` interface and wrapping (`fmt.Errorf`, `errors.Is/As`)
-- Sentinel errors vs custom error types
-- When to panic vs return an error
-- Error handling patterns in HTTP handlers
+Both walk the `%w` chain. They answer different questions:
+
+- **`errors.Is(err, target)`** — "is this *the same error*?" Compares identity. Use with sentinels.
+- **`errors.As(err, &target)`** — "is there an error of *this type* in the chain?" If so, it
+  assigns it to `target` so you can read its fields.
+
+```go showLineNumbers
+// Is: identity. No data to extract.
+if errors.Is(err, sql.ErrNoRows) {
+    return nil, &NotFoundError{Resource: "order", ID: id}
+}
+
+// As: type, plus access to the fields.
+var ve *ValidationError
+if errors.As(err, &ve) {
+    log.Printf("user error on field %s", ve.Field)   // ve is usable here
+}
+```
+
+<Mermaid chart="graph TD
+  S{What do you need<br/>from the error?} -->|Just to know which one it is| I[Sentinel + errors.Is]
+  S -->|Fields: which record, which field, retry after| A[Custom type + errors.As]
+  S -->|Only a message for the user or the log| N[Neither — just wrap and return]" />
+
+Choosing between the two shapes:
+
+| | Sentinel (`var ErrX = errors.New`) | Custom type (`struct`) |
+|---|---|---|
+| Carries data | No | Yes |
+| Compared with | `errors.Is` | `errors.As` |
+| Cost | One line | A type plus a method |
+| Good for | `ErrNotFound`, `ErrOutOfStock` — a fixed, small set | Validation, rate limits, anything with a field or an ID |
+
+Start with sentinels. Promote one to a type the moment a caller has to parse the message string to
+get something out of it — that's the signal.
+
+## `errors.Join` — more than one failure
+
+Sometimes several things are wrong at once, and reporting only the first is unhelpful. `errors.Join`
+combines them into one error that `errors.Is` and `errors.As` can still see through:
+
+```go showLineNumbers
+func (r PlaceRequest) Validate() error {
+    var errs []error
+    if r.Quantity <= 0 {
+        errs = append(errs, &ValidationError{Field: "quantity", Reason: "must be positive"})
+    }
+    if r.ProductID == 0 {
+        errs = append(errs, &ValidationError{Field: "product_id", Reason: "is required"})
+    }
+    return errors.Join(errs...)   // nil if errs is empty
+}
+```
+
+`errors.Join(nil, nil)` returns `nil`, so the empty case needs no special handling. It's also the
+right tool for cleanup paths where both the operation and the rollback can fail:
+
+```go showLineNumbers
+if err := doWork(tx); err != nil {
+    return errors.Join(err, tx.Rollback(ctx))
+}
+```
+
+## Where translation happens
+
+The rule that keeps error handling sane in a layered service:
+
+> **Each layer translates errors from the layer below into its own vocabulary, once, at the
+> boundary.**
+
+Concretely, for a lookup that finds nothing:
+
+<Note title="The translation chain" type="success">
+  1. **Store**: `pgx.ErrNoRows` → `&order.NotFoundError{Resource: "order", ID: id}`.
+     The `pgx` type stops here — nothing above the store knows the database exists.
+  2. **Service**: passes it through, or wraps it with what *it* was doing.
+     It does not convert it to a status code.
+  3. **Handler**: `errors.As` → `404` plus a JSON body. HTTP vocabulary starts and ends here.
+</Note>
+
+```go showLineNumbers title="internal/postgres/order_store.go"
+func (s *OrderStore) GetByID(ctx context.Context, id int64) (*order.Order, error) {
+    var o order.Order
+    err := s.pool.QueryRow(ctx,
+        `SELECT id, user_id, quantity, status FROM orders WHERE id = $1`, id,
+    ).Scan(&o.ID, &o.UserID, &o.Quantity, &o.Status)
+
+    if errors.Is(err, pgx.ErrNoRows) {
+        return nil, &order.NotFoundError{Resource: "order", ID: id}
+    }
+    if err != nil {
+        return nil, fmt.Errorf("querying order %d: %w", id, err)
+    }
+    return &o, nil
+}
+```
+
+<Note title="Don't let infrastructure types leak upward" type="danger">
+  If a handler has to check `pgErr.Code == "23505"`, your layers have collapsed — the HTTP package
+  now depends on the database driver, and swapping the store breaks the handler. Translate driver
+  errors in the store, every time. The same applies to an HTTP client's errors inside a
+  payments adapter.
+</Note>
+
+## The HTTP boundary
+
+Every handler ending with the same six-branch `switch` is duplication waiting to drift. Write the
+mapping once, and give handlers one line.
+
+```go showLineNumbers title="internal/httpapi/errors.go"
+package httpapi
+
+type errorResponse struct {
+    Error string `json:"error"`
+    Field string `json:"field,omitempty"`
+}
+
+// writeError maps a domain error to a status code and a JSON body.
+// This is the ONLY place in the codebase that does that mapping.
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
+    var (
+        status = http.StatusInternalServerError
+        body   = errorResponse{Error: "internal error"}
+    )
+
+    var ve *order.ValidationError
+    var nf *order.NotFoundError
+
+    switch {
+    case errors.As(err, &ve):
+        status = http.StatusBadRequest
+        body = errorResponse{Error: ve.Reason, Field: ve.Field}
+
+    case errors.As(err, &nf):
+        status = http.StatusNotFound
+        body = errorResponse{Error: nf.Error()}
+
+    case errors.Is(err, order.ErrOutOfStock):
+        status = http.StatusConflict
+        body = errorResponse{Error: "out of stock"}
+
+    case errors.Is(err, context.Canceled):
+        // The client hung up. Nothing to send, and not worth an error log.
+        return
+    }
+
+    if status >= 500 {
+        // Log the full chain internally; never send it to the client.
+        slog.ErrorContext(r.Context(), "request failed",
+            "method", r.Method, "path", r.URL.Path, "err", err)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
+}
+```
+
+```go showLineNumbers title="internal/httpapi/order_handler.go"
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req order.PlaceRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeError(w, r, &order.ValidationError{Field: "body", Reason: "malformed JSON"})
+        return
+    }
+
+    o, err := h.svc.Place(r.Context(), req)
+    if err != nil {
+        writeError(w, r, err)      // one line, every handler
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    _ = json.NewEncoder(w).Encode(o)
+}
+```
+
+<Note title="Never return a wrapped error message to the client" type="danger">
+  `fmt.Fprint(w, err.Error())` on a 500 leaks your internal chain — table names, query fragments,
+  internal hostnames — to whoever is calling. Log the full error, return a generic message. The
+  default in `writeError` above is `"internal error"` precisely for this reason.
+</Note>
+
+## Retryable vs terminal
+
+A caller deciding whether to retry needs the error to say so. Encoding it in the type beats
+matching on message strings:
+
+```go showLineNumbers
+type RetryableError struct {
+    Err   error
+    After time.Duration
+}
+
+func (e *RetryableError) Error() string { return e.Err.Error() }
+func (e *RetryableError) Unwrap() error { return e.Err }   // keeps errors.Is/As working through it
+```
+
+```go showLineNumbers
+for attempt := range maxAttempts {
+    err := send(ctx, msg)
+    if err == nil {
+        return nil
+    }
+
+    var re *RetryableError
+    if !errors.As(err, &re) {
+        return err              // terminal: retrying will not help
+    }
+    if attempt == maxAttempts-1 {
+        return err
+    }
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    case <-time.After(re.After):
+    }
+}
+```
+
+<Note title="Implement Unwrap on any wrapper type" type="warning">
+  A custom type that *contains* another error must expose `Unwrap() error`, or the chain stops
+  there and every `errors.Is` above it fails. `fmt.Errorf` with `%w` does this for you; a
+  hand-written struct does not.
+</Note>
+
+## A real example: one order request
+
+The full path of a single failure, from driver to client:
+
+```go showLineNumbers title="internal/order/errors.go"
+package order
+
+var ErrOutOfStock = errors.New("out of stock")
+
+type NotFoundError struct {
+    Resource string
+    ID       int64
+}
+
+func (e *NotFoundError) Error() string {
+    return fmt.Sprintf("%s %d not found", e.Resource, e.ID)
+}
+```
+
+```go showLineNumbers title="internal/order/service.go"
+func (s *Service) Place(ctx context.Context, req PlaceRequest) (*Order, error) {
+    if err := req.Validate(); err != nil {
+        return nil, err                      // already a *ValidationError, don't re-wrap
+    }
+
+    product, err := s.products.GetByID(ctx, req.ProductID)
+    if err != nil {
+        // Adds what THIS layer was doing. The NotFoundError underneath survives.
+        return nil, fmt.Errorf("placing order: %w", err)
+    }
+
+    if product.Stock < req.Quantity {
+        return nil, ErrOutOfStock
+    }
+
+    o := &Order{ProductID: req.ProductID, Quantity: req.Quantity}
+    if err := s.store.Create(ctx, o); err != nil {
+        return nil, fmt.Errorf("placing order: %w", err)
+    }
+    return o, nil
+}
+```
+
+Three requests, three outcomes, no extra code in the handler:
+
+| Request | Error produced | `writeError` sees | Client gets |
+|---|---|---|---|
+| `quantity: -1` | `*ValidationError` | `errors.As` matches | `400` `{"error":"must be positive","field":"quantity"}` |
+| Unknown product | `*NotFoundError`, wrapped by the service | `errors.As` matches through the wrap | `404` `{"error":"product 99 not found"}` |
+| Database down | `pgconn` error, wrapped twice | nothing matches | `500` `{"error":"internal error"}` + full chain logged |
+
+The last row is the point of wrapping: the client sees nothing useful, but the log line reads
+`placing order: querying product 99: connection refused` — layer, operation, and cause in one
+string.
+
+## Best practices
+
+- **Sentinels for identity, types for data.** Promote to a type as soon as a caller needs a field.
+- **Use pointer receivers on error types** and return pointers, or `errors.As` won't match.
+- **Implement `Unwrap() error`** on any error type that wraps another.
+- **Translate at every boundary**: driver errors die in the store, domain errors die at the handler.
+- **Map errors to responses in exactly one function.** Handlers call it; they don't switch.
+- **Never send a wrapped error to a client.** Log the chain, return a generic message on 5xx.
+- **Don't wrap an error you're just passing through unchanged** — a wrap should add information.
+- **Wrap with the operation, not the word "error"**: `"placing order: %w"`, never
+  `"error occurred: %w"`.
+- **Check `context.Canceled` at the boundary** so client disconnects don't fill your error logs.
+
+<CardGrid>
+  <Card
+    title="Concurrency →"
+    href="/docs/concurrency"
+    description="Goroutines, channels, select, and the patterns that keep them safe."
+  />
+</CardGrid>

@@ -76,12 +76,19 @@ earlier — cover the mechanics and link forward instead (e.g. Golang Fundamenta
 Written in full (10 sub-pages each, nested under a parent with `items:`): **Git Workflow**,
 **Golang Fundamentals**, **SQL / PostgreSQL Basics**.
 
-Written in full (3 flat top-level pages, no `items:` nesting): **Architecture & Design** —
-Software Architecture Patterns, Design Patterns, SOLID Principles.
+Written in full (flat top-level pages, no `items:` nesting): **Architecture & Design** (3) —
+Software Architecture Patterns, Design Patterns, SOLID Principles. **Golang Best Practices** (4) —
+Code Organization, Error Handling, Concurrency, Testing.
 
-Still placeholder stubs: Golang Best Practices (4), Database (3), DevOps & Infrastructure (5),
-Real-world Applications (3). Stubs use a `<Note type="warning">` work-in-progress block plus a
-"What to expect here" bullet list.
+Still placeholder stubs: Database (3), DevOps & Infrastructure (5), Real-world Applications (3).
+Stubs use a `<Note type="warning">` work-in-progress block plus a "What to expect here" bullet
+list, and carry `keywords` front matter like every other page.
+
+Go code in the docs is verified against the local Go toolchain before committing — a snippet that
+looked fine once shipped a `row, err := db.QueryRow(...)` that cannot compile. Paste self-contained
+examples into a scratch module and run `go build ./... && go vet ./...`; check version-specific
+claims against `$(go env GOROOT)/api/go1.N.txt` (that's how `sync.WaitGroup.Go` was pinned to
+Go 1.25).
 
 Note the two shapes: the three Foundations sections nest sub-pages under one parent entry, while
 every later section is a flat list of top-level pages sharing one `heading:`. Keep whichever
