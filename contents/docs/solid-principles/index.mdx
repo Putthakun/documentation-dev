@@ -343,7 +343,7 @@ func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-Every principle is violated at once: four reasons to change (**S**), a new coupon means editing this function (**O**), it depends on `pgxpool` and `stripe` directly (**D**), and it can't be tested without both (**I**).
+Every principle is violated at once: four reasons to change (**S**), a new coupon means editing this function (**O**), and it depends on `pgxpool` and `stripe` directly, so it can't be tested without a database and a Stripe account (**D**). **I** doesn't apply yet — there are no interfaces here at all — but it's what decides their shape once we introduce them.
 
 Refactored:
 

@@ -82,7 +82,9 @@ func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 ## Hexagonal architecture (ports & adapters)
 
-Also called Clean Architecture. Same idea as layering, but the dependency arrows are **inverted at the edges**: the core business logic sits in the middle and depends on nothing external. Everything outside — HTTP, PostgreSQL, Stripe, Kafka — plugs into it.
+Same idea as layering, but the dependency arrows are **inverted at the edges**: the core business logic sits in the middle and depends on nothing external. Everything outside — HTTP, PostgreSQL, Stripe, Kafka — plugs into it.
+
+Closely related to **Clean Architecture**, but not the same thing. Hexagonal (Ports & Adapters) is Alistair Cockburn's, and says only "the core depends on nothing outside it". Clean Architecture is Robert C. Martin's later take, which keeps that rule and additionally prescribes concentric layers inside the core — entities, then use cases, then adapters. They share the dependency rule; Clean is the more opinionated of the two.
 
 <Mermaid chart="graph LR
   HTTP[HTTP handler] --> P1[Port: UserService]
@@ -309,8 +311,10 @@ func (s *Service) Place(ctx context.Context, userID, productID int64, qty int) (
         return nil, fmt.Errorf("saving order: %w", err)
     }
 
+    // Simplified deliberately: this drops the event if the broker is down.
+    // Production code writes OrderPlaced into an outbox table inside the same
+    // transaction as the order — see the outbox note above.
     if err := s.events.Publish(ctx, OrderPlaced{OrderID: o.ID}); err != nil {
-        // Log, don't fail — the order is already committed.
         slog.Error("publishing OrderPlaced", "order_id", o.ID, "err", err)
     }
     return o, nil

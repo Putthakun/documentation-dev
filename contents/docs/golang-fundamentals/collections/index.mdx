@@ -164,8 +164,10 @@ if _, ok := seen["alice"]; ok {
 <Note title="Maps are not safe for concurrent use" type="warning">
   Concurrent reads are fine, but a concurrent read and write will crash your program with a
   "concurrent map writes" fatal error that `recover` cannot catch. Protect maps with a
-  `sync.RWMutex`, or use `sync.Map` for specific append-heavy workloads. Run tests with
-  `go test -race` to catch this.
+  `sync.RWMutex`. `sync.Map` exists but is a specialist tool — it only wins for the two cases its
+  docs name: keys written once and read many times, or goroutines working on disjoint sets of keys.
+  For write-heavy maps a plain `RWMutex` is usually faster. Run tests with `go test -race` to catch
+  this.
 </Note>
 
 ## Best practices

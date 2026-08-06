@@ -357,6 +357,11 @@ type Bus struct {
     subs map[string][]chan Event
 }
 
+func NewBus() *Bus {
+    // The map must exist — writing to a nil map panics.
+    return &Bus{subs: make(map[string][]chan Event)}
+}
+
 func (b *Bus) Subscribe(name string) <-chan Event {
     b.mu.Lock()
     defer b.mu.Unlock()
@@ -445,6 +450,9 @@ func (r RetrySender) Send(ctx context.Context, to, msg string) error {
     for i := 0; i < r.attempts; i++ {
         if err = r.inner.Send(ctx, to, msg); err == nil {
             return nil
+        }
+        if i == r.attempts-1 {
+            break                                   // no point sleeping after the last try
         }
         select {
         case <-ctx.Done():

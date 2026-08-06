@@ -10,12 +10,14 @@ Without an index, finding `WHERE email = 'alice@example.com'` means reading **ev
 
 An index is a separate, sorted data structure that lets PostgreSQL jump straight to matching rows, much like the index at the back of a book. The default type is a **B-tree**, which suits equality and range comparisons.
 
+A B-tree is wide, not deep: each 8 KB page holds hundreds of entries, so even a 10-million-row table is only about four levels tall. Finding one row costs roughly four page reads instead of ten million.
+
 <Mermaid chart="graph TD
   subgraph Without index
   Q1[WHERE email = x] --> S[Scan all 10,000,000 rows]
   end
   subgraph With index
-  Q2[WHERE email = x] --> B[Walk B-tree: ~23 steps]
+  Q2[WHERE email = x] --> B[Walk B-tree: ~4 page reads]
   B --> H[Fetch matching row]
   end" />
 
