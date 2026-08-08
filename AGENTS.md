@@ -21,14 +21,41 @@ re-looking-up the same things.
 ## Communication
 
 The owner prefers replies in **Thai**. Technical terms, commands, and code stay in English.
-Documentation **content** is written in English only.
+
+## Bilingual content (English + Thai)
+
+The site is bilingual. **English is canonical** — every page is authored and technically
+verified in English first; the Thai version is a translation of it, never the other way around.
+Technical terms, commands, and code stay in English in the Thai version too, same convention as
+chat replies.
+
+- **Routing**: locale is a path segment before `/docs`. English is the **default locale and has
+  no prefix** — `/docs/<slug>` is unchanged from every URL that exists today. Thai is always
+  explicit: `/th/docs/<slug>`. There is no `/en/...` prefix.
+- **Files**: every page is a pair in the same folder — `contents/docs/<slug>/index.mdx` (English)
+  and `contents/docs/<slug>/index.th.mdx` (Thai) — including stub/placeholder pages. A page does
+  not ship in Thai until both files exist.
+- **Sidebar**: each entry in `settings/documents.ts` needs both `title` (English) and `title_th`
+  (Thai) — one `Paths[]` array, not a parallel array per locale.
+- **UI chrome** (navbar, sidebar labels, buttons, search placeholder — everything that isn't page
+  content) is translated separately via `next-intl`, not via the `.th.mdx` files.
+- **Build gate**: `generate-content-json` is expected to fail if any href in `Documents` is
+  missing its `index.th.mdx`, so a page can't ship half-translated by accident.
+
+<!-- Status as of this note: the decision above is settled (see CONTEXT.md and
+docs/adr/0001-bilingual-en-th-architecture.md), but the routing/next-intl scaffolding,
+the `title_th` fields, and the build-gate check are not implemented yet, and the existing 68
+English-only pages have no `index.th.mdx` counterpart yet — that backlog is tracked as separate
+follow-up work, not done page-by-page as a side effect of unrelated edits. -->
 
 ## Adding or editing a page
 
-1. Content lives at `contents/docs/<slug>/index.mdx` — one folder per page, file-based routing.
+1. Content lives at `contents/docs/<slug>/index.mdx` (English) and `index.th.mdx` (Thai) — one
+   folder per page, file-based routing, both files required per the bilingual rules above.
 2. **The sidebar is not automatic.** Every page must be declared in `settings/documents.ts`
-   (`Paths[]`, type in `lib/pageroutes.ts`). Nested pages use `items:` with hrefs relative to
-   the parent; `heading:` starts a section; `{ spacer: true }` divides groups.
+   (`Paths[]`, type in `lib/pageroutes.ts`) with both `title` and `title_th`. Nested pages use
+   `items:` with hrefs relative to the parent; `heading:` starts a section; `{ spacer: true }`
+   divides groups.
 3. Run `pnpm run generate-content-json` to rebuild the search index
    (`public/search-data/documents.json`). It also runs automatically via `prebuild`.
 
