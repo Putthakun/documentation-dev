@@ -1,0 +1,189 @@
+---
+title: Agent Skills
+description: Packaging repeatable instructions as a SKILL.md file Claude discovers and invokes on its own.
+keywords: ["claude code skills", "SKILL.md", "agent skills", "claude code slash command", "disable-model-invocation"]
+---
+
+## What it is
+
+A **skill** is a directory containing a `SKILL.md` file: YAML frontmatter that tells Claude when
+to use it, followed by markdown instructions for what to do. That's the whole mechanism — no
+special runtime, no registration step beyond putting the file in the right place.
+
+The point is the same one behind extracting a shell function instead of retyping a command: if
+you keep pasting the same checklist, the same multi-step procedure, or the same "when you see X,
+do Y" into chat, that's a skill. It's also the fix for a `CLAUDE.md` that has grown past facts
+into procedure — `CLAUDE.md` content is always in context; a skill's body loads only when it's
+actually invoked, so long reference material costs nothing until you need it.
+
+Claude Code skills follow the open [Agent Skills](https://agentskills.io) standard, so a skill
+written for Claude Code is (mostly) portable to other tools that implement the same spec. Claude
+Code layers a few of its own extensions on top — invocation control, running a skill in an
+isolated subagent, and injecting live shell output into the prompt — covered below.
+
+<Note>
+  Custom commands (`.claude/commands/*.md`) and skills are the same mechanism now. A file at
+  `.claude/commands/deploy.md` and one at `.claude/skills/deploy/SKILL.md` both create a
+  `/deploy` command. Skills just add the optional directory-with-supporting-files shape and the
+  frontmatter fields below.
+</Note>
+
+## How to use it
+
+### Write one
+
+```bash
+mkdir -p ~/.claude/skills/summarize-changes
+```
+
+```yaml title="~/.claude/skills/summarize-changes/SKILL.md"
+---
+description: Summarizes uncommitted changes and flags anything risky. Use when the user asks what changed, wants a commit message, or asks to review their diff.
+---
+
+## Current changes
+
+!`git diff HEAD`
+
+## Instructions
+
+Summarize the changes above in two or three bullet points, then list any risks — missing error
+handling, hardcoded values, tests that need updating. If the diff is empty, say so.
+```
+
+The `` !`git diff HEAD` `` line is **dynamic context injection**: Claude Code runs that shell
+command before the skill content reaches Claude and splices in the real output, so the
+instructions arrive already grounded in your actual working tree. This only runs inside Claude
+Code, not in the portable subset of the spec.
+
+Either ask about your changes in plain language (Claude loads the skill automatically because
+the request matches `description`), or invoke it directly:
+
+```text
+/summarize-changes
+```
+
+### Discovery flow
+
+<Mermaid chart="graph TD
+  U[Your message] --> C{Does it match a<br/>skill's description?}
+  C -->|Yes, auto-invocable| L[Full SKILL.md loads into context]
+  C -->|No match| N[Claude answers normally]
+  S[You type /skill-name] --> L
+  L --> R[Claude follows the instructions,<br/>content stays in context for the session]" />
+
+Only the `description` (plus `when_to_use`, if set) sits in context all the time — that's how
+Claude decides *whether* a skill applies without paying for its full body on every turn. The
+full markdown loads only once the skill actually fires, and then it stays loaded for the rest of
+the session; re-invoking the identical skill doesn't duplicate it.
+
+### Where skills live
+
+| Location | Path | Scope |
+|---|---|---|
+| Personal | `~/.claude/skills/<name>/SKILL.md` | All your projects |
+| Project | `.claude/skills/<name>/SKILL.md` | This repo, shareable via git |
+| Plugin | `<plugin>/skills/<name>/SKILL.md` | Wherever the plugin is enabled |
+| Enterprise | Managed settings | Every user in the org |
+
+Project skills are discovered walking up from your working directory to the repo root, and
+nested `.claude/skills/` directories (e.g. inside a monorepo package) load the moment Claude
+touches a file in that subtree. When names collide, enterprise beats personal beats project, and
+any of those beats a bundled skill with the same name.
+
+<FileTree>
+  <Folder name="my-skill" defaultOpen>
+    <File name="SKILL.md" />
+    <File name="reference.md" />
+    <Folder name="scripts">
+      <File name="validate.sh" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+Only `SKILL.md` is required. Everything else — reference docs, templates, scripts — is optional
+weight that Claude reads or executes only when the skill's own instructions point to it. This is
+the same "keep `SKILL.md` under 500 lines, push detail into linked files" discipline that keeps
+the always-resident `description` cheap.
+
+### Frontmatter fields
+
+Every field is optional; only `description` is genuinely recommended, since it's what drives
+automatic discovery.
+
+| Field | Purpose |
+|---|---|
+| `name` | Display name in listings. The directory name is still what you type to invoke it, for personal/project skills. |
+| `description` | What the skill does and when to use it — this is what Claude matches against your prompt. |
+| `disable-model-invocation` | `true` means only you can trigger it (`/name`), never Claude on its own. Use for anything with side effects: deploys, commits, sending a Slack message. |
+| `user-invocable` | `false` hides it from the `/` menu — background knowledge Claude should know about but that isn't a meaningful command for you to run by hand. |
+| `allowed-tools` | Tools pre-approved without a permission prompt for the turn that invokes this skill. Clears on your next message. |
+| `disallowed-tools` | Tools removed from the pool while the skill is active. |
+| `argument-hint` | Autocomplete hint, e.g. `[issue-number]`. |
+| `model`, `effort` | Override just for the turn this skill runs. |
+| `context: fork` | Run the skill's instructions in an isolated subagent instead of inline — see [Subagents](/docs/subagents). |
+| `paths` | Glob patterns; the skill only auto-loads when Claude is working with matching files. |
+
+`$ARGUMENTS` (or `$0`, `$1`, …, or named via an `arguments` list) substitutes whatever follows
+the skill name when invoked, e.g. `/fix-issue 123` making `$ARGUMENTS` expand to `123`.
+
+### Skills vs. slash commands, subagents, and MCP
+
+These four get confused because they overlap in what they enable, not in what they *are*:
+
+| | What it actually is | Reach for it when |
+|---|---|---|
+| **Skill** | A markdown file with instructions, loaded into the *current* context | You keep re-explaining the same procedure or convention |
+| **Slash command** | Now unified with skills — a skill is what a custom command creates | (same as above; legacy `.claude/commands/*.md` still works) |
+| **Subagent** | A *separate* context window with its own system prompt and tool access | The work would flood your main conversation with output you won't need again |
+| **MCP server** | An external process exposing tools/resources over a protocol | You need to talk to a real system — a database, an API, a ticketing tool |
+
+A skill can *use* a subagent (`context: fork`) for isolation, and a subagent can *preload* skills
+as reference material via its `skills:` frontmatter field — they compose rather than compete.
+None of them replace MCP: a skill can tell Claude how to use an MCP tool well, but it can't call
+an external system by itself without one.
+
+## Best practices
+
+- **Front-load the trigger in `description`.** Claude matches your prompt against this field
+  alone before ever reading the body — a vague description means the skill never fires
+  automatically.
+- **`disable-model-invocation: true` on anything with side effects.** You don't want Claude
+  deciding to deploy because the code looks ready. Reserve automatic invocation for skills that
+  are safe to trigger on a guess.
+- **Keep `SKILL.md` short; push detail into linked files.** The body persists in context for the
+  rest of the session once loaded — every line is a recurring cost, not a one-time read.
+- **Write standing instructions, not one-time steps.** Claude Code doesn't re-read the file on
+  later turns; if guidance should hold for the whole task, phrase it that way.
+- **Scope `allowed-tools` narrowly and to real commands**, e.g.
+  `Bash(git add *) Bash(git commit *)`, not a blanket `Bash` grant — this is exactly the kind of
+  self-granted access you should be suspicious of when reviewing someone *else's* skill, which is
+  the subject of the next page.
+
+## A real example
+
+A project skill that runs a project's lint suite and reports only failures — useful because the
+full lint output can be hundreds of lines you don't want cluttering the main conversation:
+
+```yaml title=".claude/skills/lint-check/SKILL.md"
+---
+name: lint-check
+description: Runs the project's linter and reports only the failures. Use before committing or when asked to check code quality.
+allowed-tools: Bash(golangci-lint run *)
+context: fork
+---
+
+Run `golangci-lint run ./...` and report only the failing lint rules, grouped by file. If
+everything passes, say so in one line — don't restate the command output.
+```
+
+Because `context: fork` is set, this runs in its own subagent: the (potentially huge) raw
+linter output never touches the main conversation's context, and only the summary comes back.
+
+<CardGrid>
+  <Card
+    title="Skills Ecosystem (skills.sh) →"
+    href="/docs/skills-ecosystem"
+    description="Installing, evaluating, and trusting third-party skills instead of only writing your own."
+  />
+</CardGrid>

@@ -1,0 +1,213 @@
+---
+title: Hooks
+description: Run shell commands automatically at fixed points in Claude Code's lifecycle.
+keywords: ["claude code hooks", "PreToolUse", "PostToolUse", "settings.json", "hook exit codes", "UserPromptSubmit"]
+---
+
+## What they are
+
+CLAUDE.md and skills are context — Claude reads them and *usually* follows them, but nothing forces
+it. Hooks are the opposite: shell commands Claude Code runs automatically at fixed points in its
+lifecycle, with no LLM judgment involved. A hook fires whether or not Claude "decided" to — that's
+the entire point. Use hooks for anything that must be deterministic: blocking a dangerous command,
+formatting a file after every edit, or logging every tool call, regardless of what Claude thinks is
+a good idea in the moment.
+
+## Hook events
+
+| Event | Fires |
+|---|---|
+| `SessionStart` | When a session begins or resumes |
+| `UserPromptSubmit` | When you submit a prompt, before Claude processes it |
+| `PreToolUse` | Before a tool call executes — can block it |
+| `PostToolUse` | After a tool call succeeds |
+| `PostToolUseFailure` | After a tool call fails |
+| `Notification` | When Claude Code sends a notification (e.g. waiting for input) |
+| `Stop` | When Claude finishes responding for the turn |
+| `SubagentStop` | When a subagent finishes |
+| `PreCompact` | Before context compaction |
+| `SessionEnd` | When a session terminates |
+
+`PreToolUse`, `PostToolUse`, and `PostToolUseFailure` filter by tool name via `matcher` (e.g.
+`Bash`, `Edit|Write`, or a regex like `mcp__.*` for MCP tools). `SessionStart` and `SessionEnd`
+filter by how the session started or ended (`startup`, `resume`, `compact`, `clear`, ...).
+`UserPromptSubmit` and `Stop` don't take a matcher — they fire on every occurrence.
+
+## Configuring hooks
+
+Hooks live under a `hooks` key in a settings file. Which file you use decides the scope:
+
+| Location | Scope | Shareable |
+|---|---|---|
+| `~/.claude/settings.json` | All your projects | No |
+| `.claude/settings.json` | This project | Yes — commit it |
+| `.claude/settings.local.json` | This project, just you | No — gitignore it |
+
+```json title=".claude/settings.json"
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | xargs npx prettier --write"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Each event key holds an array of matcher groups, and each group holds an array of hooks to run
+when that matcher fires. Run `/hooks` inside a session to browse everything currently configured,
+grouped by event, with a count next to each event that has hooks attached.
+
+## Input and output
+
+A hook receives JSON on stdin. Every event includes `session_id`, `cwd`, and `hook_event_name`;
+each event adds its own fields. A `PreToolUse` hook watching `Bash` gets the command it's about to
+run:
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/Users/you/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf build/" }
+}
+```
+
+The hook talks back through **exit code** and, optionally, **stdout**:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | No objection — the action proceeds. For `PreToolUse` this doesn't *approve* the call; normal permission checks still apply. |
+| `2` | Block the action. Write the reason to stderr — Claude receives it as feedback and can adjust. |
+| Anything else | Action proceeds; treated as a non-blocking error |
+
+<Note type="warning">
+  Not every event can be blocked. Exit 2 on `SessionStart` or `Notification`, for example, just
+  shows the stderr message to you and continues — it can't stop a session from starting.
+</Note>
+
+For more control than "block or don't," exit `0` and print a JSON object to stdout instead of
+relying on the exit code alone:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Use rg instead of grep — faster on this codebase"
+  }
+}
+```
+
+`permissionDecision` accepts `allow`, `deny`, or `ask`. Don't mix exit-2-and-stderr with
+exit-0-and-JSON on the same hook — Claude Code ignores the JSON output whenever the hook exits 2.
+
+`PostToolUse` and `Stop` hooks use a slightly different shape — a top-level `"decision": "block"`
+plus a `"reason"` — since there's no tool call left to deny, only feedback to hand back.
+
+## Use cases
+
+### Block a dangerous command
+
+```bash title=".claude/hooks/block-dangerous.sh" showLineNumbers
+#!/bin/bash
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command')
+
+if echo "$COMMAND" | grep -qE 'rm -rf (/|~|\.\.)'; then
+  echo "Refusing rm -rf on a root-ish path. Be specific." >&2
+  exit 2
+fi
+
+exit 0
+```
+
+```json title=".claude/settings.json"
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/block-dangerous.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`${CLAUDE_PROJECT_DIR}` keeps the hook path-independent so it works the same regardless of where
+the repo is checked out.
+
+### Auto-format after every edit
+
+```json title=".claude/settings.json"
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "jq -r '.tool_input.file_path' | xargs npx prettier --write" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Log every command Claude runs
+
+```json title="~/.claude/settings.json"
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "jq -r '.tool_input.command' >> ~/.claude/command-log.txt" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+A personal, user-scoped hook like this is a good default for anything you want everywhere without
+committing it to every project — put project-specific enforcement (formatting, dangerous-command
+blocks the whole team should have) in `.claude/settings.json` instead, so it travels with the repo.
+
+## Best practices
+
+- **Match as narrowly as possible.** A `matcher` of `Edit|Write` instead of every tool call, an
+  `if` condition scoped to the exact command shape you care about — narrow matching means less
+  overhead and fewer false positives blocking legitimate work.
+- **Exit 2 + stderr, or exit 0 + JSON — don't mix.** Pick one control mechanism per hook; Claude
+  Code ignores the JSON path once you've exited 2.
+- **Keep hook scripts fast.** They run synchronously in the tool-call path (default timeout 600s,
+  usually configured much lower); a slow hook is a slow session for everyone using the tool call it
+  matches.
+- **Store scripts in `.claude/hooks/`** and reference them with `${CLAUDE_PROJECT_DIR}` so they're
+  portable across checkouts and reviewable in the same PR as the code they enforce.
+- **Prefer a hook over a CLAUDE.md instruction** for anything that must happen every time,
+  unconditionally — "always format," "never touch this file." CLAUDE.md is a request Claude usually
+  follows; a hook is not optional.
+- **Use `/hooks` to verify** a new hook actually registered before relying on it — a typo in
+  `settings.json` fails silently for that hook rather than erroring loudly.
+
+<CardGrid>
+  <Card
+    title="Status Line →"
+    href="/docs/status-line"
+    description="Customize what Claude Code shows in the terminal status line."
+  />
+</CardGrid>

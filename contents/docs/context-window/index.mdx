@@ -1,0 +1,150 @@
+---
+title: Context Window
+description: How Claude Code's context fills up during a session, and how to manage it.
+keywords: ["context window", "claude code compaction", "/compact", "/clear", "auto-compact", "token usage"]
+---
+
+## What it is
+
+The context window is everything Claude has "in mind" for the current session: the system prompt,
+your `CLAUDE.md` and auto memory, MCP tool listings, every file it's read, every response it's
+given, hook output, subagent summaries — all of it counted in tokens, all of it re-sent to the
+model with every single message. This is the same context window covered generally for the model
+itself in the API — what's specific to Claude Code is *what fills it automatically before you type
+anything*, and what it does when it starts running out.
+
+## What loads before you type a word
+
+A surprising share of the window is spent before your first prompt:
+
+- The system prompt
+- Auto memory (`MEMORY.md`, capped at the first 200 lines or 25KB)
+- Environment info (cwd, platform, shell, git status)
+- MCP tool names (schemas stay deferred and load on demand, not upfront)
+- Skill descriptions (one line each, so Claude knows what it can invoke)
+- `CLAUDE.md` and unscoped `.claude/rules/*.md` files
+
+<Mermaid chart="graph LR
+  A[Session starts] --> B[System prompt + env info]
+  B --> C[CLAUDE.md + auto memory loaded]
+  C --> D[MCP tool names + skill descriptions]
+  D --> E[Your first prompt]
+  E --> F[Each file read / tool call adds tokens]
+  F --> G{Approaching<br/>context limit?}
+  G -->|No| F
+  G -->|Yes| H[Auto-compact: conversation<br/>summarized, key files reload]
+  H --> F" />
+
+From there, every file Claude reads, every tool result, every path-scoped rule that fires because
+you touched a matching file — all of it keeps accumulating. Nothing shrinks the window
+automatically except compaction.
+
+## Checking usage
+
+Run `/context` for a live, categorized breakdown of what's actually consuming your window right
+now — including which CLAUDE.md and memory files loaded — with suggestions for trimming it. `/usage`
+shows token counts and (for API-billed usage) a rough dollar cost for the session. If you want
+usage visible continuously instead of on demand, the status line can be configured to show it (see
+[Status Line](/docs/status-line)).
+
+## `/compact` and auto-compact
+
+`/compact` replaces the conversation history with a structured summary, freeing up space while
+trying to keep what matters. You can steer what it keeps:
+
+```bash
+/compact focus on the auth bug fix
+```
+
+Claude Code also compacts **automatically** as the conversation approaches the model's context
+limit — the same summarization pass, just triggered for you instead of by hand, so a full context
+window doesn't end your session. How full it lets things get before compacting is the
+**auto-compact window**, adjustable with `/autocompact 500k` (accepts a plain token count, a `k`/`M`
+suffix, or a bare number treated as thousands). With nothing set, Claude Code compacts once the
+conversation reaches the model's context limit.
+
+### What survives compaction
+
+Not everything reloads the same way after a `/compact`:
+
+| Loaded via | After compaction |
+|---|---|
+| System prompt, output style | Unchanged — never part of message history |
+| Project-root `CLAUDE.md`, unscoped rules | Re-injected from disk |
+| Auto memory | Re-injected from disk |
+| Rules with `paths:` frontmatter | Lost until a matching file is read again |
+| Nested `CLAUDE.md` in subdirectories | Lost until a file in that subdirectory is read again |
+| Invoked skill bodies | Re-injected, capped per skill and in total — oldest dropped first |
+| Hooks | Not applicable — hooks are code, not context |
+
+The practical consequence: an instruction you only said out loud in chat, or a path-scoped rule
+that hasn't matched a file recently, can quietly disappear after a compaction. If it needs to
+survive, it belongs in your project-root `CLAUDE.md`.
+
+## `/compact` vs `/clear`
+
+These solve different problems and it's easy to reach for the wrong one:
+
+| | `/compact` | `/clear` |
+|---|---|---|
+| Keeps | A summary of the conversation | Nothing — fresh session |
+| Cost to run | A real request (reads the whole conversation to summarize it) | Free |
+| Use when | Continuing related work, but context is getting full | Switching to unrelated work |
+
+**`/clear` between unrelated tasks.** Stale context from a finished task doesn't help the next one
+— it just costs tokens on every subsequent message and dilutes what Claude pays attention to. Run
+`/rename` first if you want to find the old session again later; `/resume` brings it back.
+
+**`/compact` mid-task**, when you need the history but the window is filling up. Since compacting a
+large context is itself an expensive request (it has to read everything it's about to summarize),
+compacting *before* it's actually necessary just to "be safe" isn't free — let auto-compact do its
+job unless you specifically want to steer what's kept.
+
+## Managing context proactively
+
+- **Delegate large reads to a subagent.** A subagent gets its own separate context window; only
+  its final summary comes back to yours. Sending a big log file or a broad codebase search through
+  a subagent keeps the raw content out of your main session entirely.
+- **Write specific prompts.** "Add input validation to the login handler in `auth.go`" costs far
+  less context than "improve this codebase," which triggers broad exploratory reads to figure out
+  what you meant.
+- **Keep CLAUDE.md lean.** It's loaded in full, every session, whether the current task needs it
+  or not — see [Memory - CLAUDE.md](/docs/claude-md) for sizing guidance.
+- **Prefer CLI tools over MCP servers where both exist.** `gh`, `aws`, `gcloud` don't add anything
+  to the tool listing beyond their name; a live MCP connection can add meaningfully more, though
+  full tool schemas are deferred until actually used.
+- **Use hooks to pre-filter noisy output.** A `PostToolUse` hook that greps a 10,000-line test log
+  down to just the failures saves the tokens of Claude reading all of it — see
+  [Hooks](/docs/hooks).
+
+## A real example
+
+A session that's been open all afternoon debugging a flaky integration test, now switching to an
+unrelated task — write a new endpoint:
+
+```bash
+# Wrong: context fills with debugging history that's now irrelevant
+# to writing a new handler, and every message pays for it anyway.
+
+/rename flaky-integration-test-debug
+/clear
+# fresh session — CLAUDE.md and auto memory reload, debugging history doesn't
+```
+
+Versus continuing the *same* task after a long back-and-forth that's approaching the limit:
+
+```bash
+/compact focus on what we changed in the retry logic and why the test still fails
+# conversation gets summarized with that focus; you keep working on the same problem
+```
+
+Two different tools for what looks like the same symptom ("context is full, but that means one
+thing before a `/clear` and another before a `/compact`").
+
+<CardGrid>
+  <Card
+    title="Hooks →"
+    href="/docs/hooks"
+    description="Run shell commands automatically at points in Claude Code's lifecycle."
+  />
+</CardGrid>

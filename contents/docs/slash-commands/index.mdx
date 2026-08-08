@@ -1,0 +1,137 @@
+---
+title: Slash Commands
+description: Built-in and custom slash commands in Claude Code, and how to write your own.
+keywords: ["claude code slash commands", "custom commands", ".claude/commands", "skills", "frontmatter", "arguments"]
+---
+
+## What they are
+
+Slash commands are the `/thing` shortcuts you type at the Claude Code prompt: `/clear`, `/compact`,
+`/model`, `/agents`. Some are built into the CLI with coded behavior — `/compact` runs a real
+summarization pass, `/clear` actually resets the session. Others are just prompts on disk that
+get expanded into a message when you type their name. Those are **custom commands**, and as of
+recent Claude Code versions they've been folded into a broader mechanism called **skills** — a
+file at `.claude/commands/deploy.md` and a skill at `.claude/skills/deploy/SKILL.md` both create
+`/deploy` and behave the same way. Existing `.claude/commands/` files keep working unchanged.
+
+The distinction that matters day to day: built-in commands have logic written into the CLI itself
+(`/compact`, `/clear`, `/model`); everything else — custom commands and skills — is a prompt Claude
+reads, optionally with instructions Claude can also decide to run on its own.
+
+## Useful built-in commands
+
+A working subset, grouped by what you reach for them for:
+
+| Command | Does |
+|---|---|
+| `/clear` | Start a fresh conversation, keeping project memory |
+| `/compact` | Summarize the conversation to free up context |
+| `/model` | Switch models mid-session |
+| `/agents` | Create and manage subagent configurations |
+| `/memory` | Open CLAUDE.md and auto-memory files for editing |
+| `/context` | Show a breakdown of what's consuming your context window |
+| `/init` | Generate a starting CLAUDE.md by analyzing the codebase |
+| `/permissions` | Set approval rules for file and command access |
+| `/hooks` | Browse configured hooks by event |
+| `/rewind` | Roll code and conversation back to an earlier checkpoint |
+| `/resume` | Return to an earlier conversation |
+| `/usage` | Show token and cost usage for the session |
+
+Run `/help` inside a session for the full, version-accurate list — new commands ship often enough
+that any list here will drift.
+
+## Writing a custom command
+
+Drop a markdown file in `.claude/commands/` (project) or `~/.claude/commands/` (personal). The
+file name becomes the command name, and the file body becomes the prompt Claude receives when you
+invoke it.
+
+<FileTree>
+  <Folder name=".claude" defaultOpen>
+    <Folder name="commands" defaultOpen>
+      <File name="deploy.md" />
+      <File name="fix-issue.md" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+```markdown title=".claude/commands/fix-issue.md"
+---
+description: Fix a GitHub issue by number
+disable-model-invocation: true
+---
+
+Fix GitHub issue $ARGUMENTS following our coding standards. Read the issue with
+`gh issue view $ARGUMENTS` first, then implement the fix and open a PR.
+```
+
+Typing `/fix-issue 482` expands the file into a message with `$ARGUMENTS` replaced by `482`.
+
+### Frontmatter that matters most
+
+| Field | Purpose |
+|---|---|
+| `description` | Shown in autocomplete; also what Claude reads to decide whether to invoke the command itself |
+| `disable-model-invocation` | `true` means only you can trigger it — never Claude on its own. Use this for anything with side effects: deploys, commits, sending messages |
+| `argument-hint` | Autocomplete hint, e.g. `[issue-number]` |
+| `allowed-tools` | Tools pre-approved for the turn that invokes the command, so Claude doesn't stop to ask permission mid-flow |
+
+<Note type="warning">
+  `disable-model-invocation: true` is the important default for anything destructive. Without it,
+  Claude can decide on its own that a `/deploy` or `/commit`-style command is the right next step
+  and run it — fine for a linting command, not fine for something that pushes to production.
+</Note>
+
+### Arguments
+
+```markdown title=".claude/commands/migrate.md"
+---
+description: Migrate a component from one framework to another
+---
+
+Migrate the $ARGUMENTS[0] component from $ARGUMENTS[1] to $ARGUMENTS[2].
+```
+
+`/migrate-component SearchBar React Vue` fills in `$ARGUMENTS[0]` = `SearchBar`,
+`$ARGUMENTS[1]` = `React`, `$ARGUMENTS[2]` = `Vue`. `$0`, `$1`, `$2` are shorthand for the same
+thing. Multi-word arguments need quotes: `/migrate "Search Bar" React Vue` makes `$0` expand to
+`Search Bar`. If the command body doesn't reference `$ARGUMENTS` at all, Claude Code appends
+`ARGUMENTS: <what you typed>` so the text isn't silently dropped.
+
+## Project vs. personal commands
+
+| Location | Scope | Shared via |
+|---|---|---|
+| `.claude/commands/` (project) | Everyone working on this repo | Git — committed with the code |
+| `~/.claude/commands/` (personal) | Every project on your machine | Not shared — it's yours |
+
+Put team workflow commands — "run our lint + test + format sequence", "open a PR with our
+template" — in the project directory so a teammate cloning the repo gets them for free. Put
+personal shortcuts — your own scratch-notes command, a personal git alias workflow — in the
+`~/.claude/commands/` directory so they follow you across every repo without polluting anyone
+else's project.
+
+Skills add a directory-based version (`.claude/skills/<name>/SKILL.md`) with room for supporting
+files, but for a single-file prompt like the ones above, a flat `.claude/commands/*.md` file is
+the simpler choice and works identically.
+
+## Best practices
+
+- **Gate anything with side effects** with `disable-model-invocation: true` — deploys, commits,
+  messages to other systems. Don't let Claude decide the timing for you.
+- **Keep the prompt specific.** A command is a saved prompt, not magic — vague instructions in the
+  file produce the same vague results they would typed inline.
+- **Commit team workflow commands to the project directory.** A command only you can see doesn't
+  help the next person debugging the same deploy script.
+- **Use `argument-hint`** so autocomplete tells you (and teammates) what the command expects,
+  instead of everyone re-reading the file to remember the argument order.
+- **Prefer a command over repeating yourself in chat.** If you've typed the same multi-step
+  instruction into Claude Code twice, that's the signal to save it as a command.
+
+<CardGrid>
+  <Card
+    title="Memory - CLAUDE.md →"
+    href="/docs/claude-md"
+    description="How Claude Code loads project, personal, and enterprise memory, and what belongs there."
+  />
+</CardGrid>

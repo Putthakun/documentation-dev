@@ -1,0 +1,133 @@
+---
+title: "Memory - CLAUDE.md"
+description: How Claude Code loads persistent project and personal instructions.
+keywords: ["CLAUDE.md", "claude code memory", "AGENTS.md", "@import", "auto memory", "project instructions"]
+---
+
+## What it is
+
+Every Claude Code session starts with an empty context window — no memory of yesterday's session
+carries over on its own. `CLAUDE.md` is how you give it persistent instructions anyway: a plain
+markdown file, loaded fresh at the start of every session, that Claude treats as context rather
+than enforced configuration. This repo's own `AGENTS.md` (imported by `CLAUDE.md` at the project
+root) is exactly this mechanism in use — the rules about the sidebar not being automatic, the
+`/docs` prefix on Card hrefs, and the section-shape conventions all live there because they're
+things worth re-stating every session rather than re-discovering by trial and error.
+
+Claude Code also has a second, separate memory system: **auto memory**, notes Claude writes to
+itself in `~/.claude/projects/<project>/memory/` based on corrections you give it during a
+session. CLAUDE.md is what *you* write; auto memory is what *Claude* writes. Both load every
+session; this page is about the one you control directly.
+
+## How it loads
+
+CLAUDE.md files exist at several scopes, loaded in this order — broadest to most specific, so
+project instructions are the last (and therefore most emphasized) thing Claude reads:
+
+| Scope | Location | Shared with |
+|---|---|---|
+| Managed policy | `/etc/claude-code/CLAUDE.md` (Linux), platform equivalent elsewhere | Everyone on the machine, enforced by IT |
+| User | `~/.claude/CLAUDE.md` | Just you, across all projects |
+| Project | `./CLAUDE.md` or `./.claude/CLAUDE.md` | The whole team, via git |
+| Local | `./CLAUDE.local.md` | Just you, this project — gitignored |
+
+Claude Code walks up the directory tree from your working directory, loading `CLAUDE.md` and
+`CLAUDE.local.md` from every directory it passes through. Files at the repo root load in full at
+launch; `CLAUDE.md` files in *subdirectories* load only when Claude actually reads a file in that
+subdirectory — they aren't pulled into context just because they exist. Within one directory,
+`CLAUDE.local.md` loads after `CLAUDE.md`, so your personal notes are the last thing read at that
+level.
+
+<Mermaid chart="graph TD
+  A[Managed policy CLAUDE.md] --> B[User ~/.claude/CLAUDE.md]
+  B --> C[Project ./CLAUDE.md]
+  C --> D[Project CLAUDE.local.md]
+  D --> E[Session context]
+  F[Nested dir CLAUDE.md] -.->|loaded only when Claude<br/>reads a file there| E" />
+
+Run `/context` in a session to see exactly which memory files actually loaded — the fastest way
+to confirm a file you just added is being picked up.
+
+## Imports with `@path`
+
+A CLAUDE.md can pull in other files with `@path/to/file`:
+
+```markdown
+See @README for project overview and @package.json for available npm commands.
+
+# Additional Instructions
+- git workflow: @docs/git-instructions.md
+```
+
+Imported files are expanded into context at launch, alongside the file that references them, and
+can recursively import up to four hops deep. Wrapping a path in backticks (`` `@README` ``) keeps
+it literal text instead of triggering an import — useful when you just want to *mention* a path.
+
+This is exactly how this project's root `CLAUDE.md` works: it's a one-line `@AGENTS.md` import, so
+the actual instructions live in a file other tools (or humans) can read directly, and Claude Code
+just pulls it in. That pattern — `@AGENTS.md` plus Claude-specific additions below it — is the
+recommended way to share one instructions file across multiple AI coding tools:
+
+```markdown title="CLAUDE.md"
+@AGENTS.md
+
+## Claude Code
+
+Use plan mode for changes under src/billing/.
+```
+
+<Note type="warning">
+  An import that resolves *outside* your working directory (e.g. `@~/.claude/my-notes.md` from a
+  project file) is treated as external and triggers a one-time approval dialog the first time
+  Claude Code sees it — someone else could have committed a project file that imports something
+  unexpected. Imports in your own user-scope files never prompt.
+</Note>
+
+## `/memory` and troubleshooting
+
+`/memory` lists every CLAUDE.md and CLAUDE.local.md location across scopes — including ones that
+don't exist yet — and opens the one you pick in your editor. If Claude isn't following an
+instruction:
+
+1. Run `/context` and check the **Memory files** list — if the file isn't there, Claude never saw
+   it.
+2. Check it's in a location that actually loads for this session (see the table above).
+3. Make the instruction more specific. "Use 2-space indentation" is followed far more reliably
+   than "format code nicely" — CLAUDE.md is context Claude tries to follow, not enforced
+   configuration, so specificity is what compliance actually depends on.
+4. Look for contradictions across files. Two CLAUDE.md files giving different guidance for the
+   same thing means Claude picks one arbitrarily.
+
+CLAUDE.md content also survives `/compact`: the project-root file is re-read from disk and
+re-injected after every compaction. Nested CLAUDE.md files and path-scoped rules are not
+automatically re-injected — they reload the next time Claude reads a matching file.
+
+For something that must happen deterministically every time, regardless of what Claude decides —
+"always run the linter before a commit," "never let this file be edited" — a CLAUDE.md instruction
+is the wrong tool. It's a request, not an enforcement mechanism. Use a [hook](/docs/hooks) instead.
+
+## Best practices
+
+- **Keep it under ~200 lines.** Longer files cost more context on every session and measurably
+  reduce how reliably Claude follows any single instruction in them.
+- **Write down what you'd otherwise re-explain.** The trigger conditions worth remembering: Claude
+  made the same mistake twice, a code review caught something Claude should have already known, or
+  you typed the same correction into chat two sessions in a row.
+- **Be concrete enough to verify.** "Run `pnpm run build` before pushing" beats "make sure it
+  builds." A vague rule is unfalsifiable, so Claude can't reliably tell whether it followed it.
+- **Move procedures out, keep facts in.** A multi-step workflow ("how to cut a release") belongs in
+  a skill, loaded on demand — not in CLAUDE.md, loaded on every single session whether you need it
+  or not.
+- **Use `.gitignore`d `CLAUDE.local.md`** for anything personal — your local sandbox URLs, test
+  data — that shouldn't leak into a teammate's context via git.
+- **Don't fight auto memory for the same job.** If Claude keeps re-learning a build quirk on its
+  own, let auto memory hold it; reserve CLAUDE.md for things you decided deliberately, not things
+  Claude discovered.
+
+<CardGrid>
+  <Card
+    title="Context Window →"
+    href="/docs/context-window"
+    description="How context fills up during a session, and when and how compaction kicks in."
+  />
+</CardGrid>

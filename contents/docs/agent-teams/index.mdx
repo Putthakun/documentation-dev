@@ -1,0 +1,187 @@
+---
+title: Agent Teams
+description: Coordinating multiple Claude Code sessions on one task, and when the coordination overhead is worth it.
+keywords: ["claude code", "agent teams", "multi-agent", "orchestration", "git worktrees", "parallel sessions"]
+---
+
+## What it is
+
+Most Claude Code usage is one session, one context window. [Subagents](/docs/subagents) extend
+that from inside the session — the main agent delegates a side task to a helper that reports back
+a summary and disappears. This page is about the next level up: **running several independent
+Claude Code sessions on the same piece of work, at the same time**, and having them coordinate.
+
+There are two ways this actually happens, and it's worth keeping them distinct:
+
+1. **Agent teams** — an experimental, named Claude Code feature. One session (the **lead**)
+   spawns other full Claude Code sessions (**teammates**), each with its own context window. They
+   share a task list, claim work, and message each other directly — the lead doesn't have to
+   relay everything.
+2. **Manual parallel sessions** — no special feature at all, just you opening several terminals
+   (or [tmux](/docs/tmux) panes) and running `claude` in each, typically one per
+   [git worktree](https://git-scm.com/docs/git-worktree) so the sessions don't collide on files.
+   Claude Code supports this directly with `claude --worktree <name>`.
+
+Both are "agent teams" in the loose, workflow sense of the phrase. Only the first is a specific
+product feature with that name, and it's still experimental — behind a flag, subject to change,
+with documented rough edges around session resumption and shutdown. The rest of this page covers
+both, and says clearly which is which.
+
+<Note title="This is not the same as Subagents" type="default">
+  [Subagents](/docs/subagents) run *inside* one session's process, report results back to that one
+  caller, and can't talk to each other. Agent teams are separate Claude Code processes, each with
+  independent context, that message each other directly and share a task list. If your workers
+  only need to report back to you, subagents are simpler and far cheaper in tokens. Reach for a
+  team when the workers need to coordinate *with each other*, not just with you.
+</Note>
+
+## How subagents and agent teams differ
+
+| | Subagents | Agent teams |
+|---|---|---|
+| **Process** | Runs inside the caller's session | Separate Claude Code session per teammate |
+| **Context** | Own context window, returns a summary to the caller | Own context window, fully independent |
+| **Communication** | Reports back to the main agent only | Teammates message each other directly |
+| **Coordination** | Main agent manages all delegation | Shared task list; teammates self-claim work |
+| **Token cost** | Lower — most work is summarized away | Higher — every teammate is a full Claude instance |
+| **Best for** | A focused side task where only the result matters | Work that benefits from discussion or independent parallel exploration |
+
+## How to use it
+
+### The built-in feature
+
+Agent teams ship behind an experimental flag. Enable it in `settings.json`:
+
+```json title="~/.claude/settings.json"
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
+With it enabled, ask for a team in plain language and Claude spawns and coordinates it:
+
+```text
+Spawn three teammates to review this PR:
+- one focused on security implications
+- one checking performance impact
+- one validating test coverage
+Have them each review and report findings.
+```
+
+Claude decides how many teammates a task needs unless you say so explicitly. The lead's terminal
+shows a panel listing teammates below the prompt; arrow keys select one, Enter opens its
+transcript so you can read or message it directly, Escape interrupts its current turn.
+
+Under the hood, the team is built from three pieces:
+
+<Mermaid chart="graph TD
+  You[You] -->|describe the task| Lead[Team lead<br/>your main session]
+  Lead -->|spawns, assigns tasks| T1[Teammate: security]
+  Lead -->|spawns, assigns tasks| T2[Teammate: performance]
+  Lead -->|spawns, assigns tasks| T3[Teammate: tests]
+  T1 <-.messages.-> T2
+  T2 <-.messages.-> T3
+  T1 <-.messages.-> T3
+  T1 -.claims/updates.-> Tasks[(Shared task list)]
+  T2 -.claims/updates.-> Tasks
+  T3 -.claims/updates.-> Tasks" />
+
+- **Task list** — pending / in-progress / completed work items, some with dependencies on others.
+  Teammates self-claim the next unblocked task when they finish one, or the lead assigns work
+  explicitly.
+- **Mailbox** — each teammate has an inbox; `SendMessage`-style delivery is automatic, so the lead
+  doesn't need to poll for updates. When a teammate goes idle, it notifies the lead.
+- **Display mode** — teammates run **in-process** by default (all inside your one terminal,
+  switched between via the agent panel) or in **split panes**, one pane per teammate, which
+  requires [tmux](/docs/tmux) or iTerm2. See
+  [Agent Teams with tmux](/docs/agent-teams-tmux) for that setup in full.
+
+Two other controls worth knowing:
+
+- **Plan approval** — for risky work, ask a teammate to plan before touching files: *"Spawn an
+  architect teammate to refactor the auth module. Require plan approval before making changes."*
+  It works in read-only plan mode until the lead approves.
+- **Reusable roles** — a teammate can be spawned from a named [subagent](/docs/subagents)
+  definition (project, user, or plugin-scoped), so a `security-reviewer` role works both as an
+  on-demand subagent and as a team role, defined once.
+
+### The manual pattern
+
+You don't need the experimental flag to run multiple Claude Code sessions on one task — this is
+just running `claude` more than once, deliberately kept isolated:
+
+```bash
+claude --worktree feature-auth      # terminal 1: isolated checkout on its own branch
+claude --worktree fix-rate-limit    # terminal 2: a second isolated checkout
+```
+
+Each `--worktree` invocation creates a real `git worktree` — a separate working directory on its
+own branch, checked out from the same repository — so two sessions editing "the same project" are
+never editing the same files on disk. This is the mechanism [Agent Teams with
+tmux](/docs/agent-teams-tmux) builds a concrete layout around: one pane per session, one worktree
+per pane.
+
+The manual pattern gives up the shared task list and inter-agent messaging the built-in feature
+provides — you are the coordination layer, reading each session's output and deciding what
+happens next. In exchange, it needs no flag, has no experimental-feature caveats, and is exactly
+as debuggable as running Claude Code normally, because that's all it is.
+
+## When it's worth the complexity
+
+Both forms of "multiple agents" cost more than one session: more tokens (every teammate is a full
+context window), more attention (someone has to read what each one produces), and — for the
+built-in feature specifically — you're opting into an experimental code path.
+
+They're worth it when:
+
+- **The work is genuinely parallel and independent.** Three people could do these three things at
+  the same time without talking to each other much. New modules, a security/performance/test
+  three-way review, cross-layer changes (frontend, backend, tests) each owned by one worker.
+- **Competing hypotheses beat one investigation.** A single agent (like a single engineer)
+  anchors on the first plausible theory it finds. Several agents independently investigating a bug
+  and actively trying to disprove each other converge on the real root cause faster than one
+  agent going down one path.
+- **You want review from different angles on the same artifact.** One reviewer tends to focus on
+  one category of issue at a time; three reviewers with three different mandates catch more, in
+  parallel, than one reviewer catching three things in sequence.
+
+They're not worth it — plain subagents or a single session serve better — when:
+
+- **The work is sequential or has heavy dependencies.** If step 2 needs step 1's output, teammates
+  spend most of their time waiting or re-coordinating, and you've paid for parallelism you can't
+  use.
+- **Multiple workers would touch the same files.** Two agents editing one file is a conflict
+  generator, not a speedup — this applies whether it's two subagents, two teammates, or two people.
+- **It's routine work a single session handles fine.** Coordination overhead (spawning, task
+  handoffs, synthesizing results) isn't free even when it doesn't cause conflicts. Reach for teams
+  when the parallel exploration is the point, not by default.
+
+## Best practices
+
+- **Start with research and review, not implementation**, if you're new to this. Reviewing a PR
+  from three angles has clear task boundaries and low conflict risk; parallel code-writing has
+  both.
+- **Give each teammate real context in the spawn prompt.** Teammates load `CLAUDE.md`, skills, and
+  MCP servers automatically, but not the lead's conversation history — say what you'd tell a new
+  hire walking into the task cold.
+- **Size the team to the task, not the ceiling.** Three to five teammates is a reasonable range for
+  most work; more teammates adds coordination overhead and token cost without proportional speedup.
+- **One owner per file.** Whether it's the built-in feature or manual worktrees, decide up front
+  who owns which files or modules so nobody's overwriting anybody else's edits.
+- **Stay in the loop.** Check in on progress, redirect approaches that have gone sideways, and
+  synthesize findings as they arrive rather than walking away for an hour. An unattended team
+  running the wrong direction for a long time is expensive in a way an unattended single session
+  usually isn't.
+- **Prefer subagents when workers don't need to talk to each other.** If the only communication
+  path you need is "worker reports back to me," that's the cheaper, simpler tool — see
+  [Subagents](/docs/subagents).
+
+<CardGrid>
+  <Card
+    title="tmux - Terminal Multiplexer →"
+    href="/docs/tmux"
+    description="Persistent, multi-pane terminal sessions — the tool that makes watching several agents at once practical."
+  />
+</CardGrid>

@@ -1,0 +1,182 @@
+---
+title: Status Line
+description: Configuring a custom status bar in Claude Code to surface context usage, cost, and git state.
+keywords: ["claude code statusline", "statusLine settings.json", "claude code status bar", "context window usage"]
+---
+
+## What it is
+
+The status line is the bar at the bottom of Claude Code. By default it shows a handful of
+built-in footer hints. Point the `statusLine` setting at a script, and Claude Code instead pipes
+JSON session data to that script on stdin and prints whatever it writes to stdout — model name,
+cost, context usage, git branch, or anything you can derive from that JSON.
+
+It runs **locally** and costs no API tokens. Think of it as the DevOps instinct applied to your
+own tooling: you wouldn't run a service without a dashboard, and a long Claude Code session is
+similar — you want to see context filling up before you get compacted mid-task, and see cost
+accumulating before it surprises you.
+
+The script re-runs on session start, after each assistant message, after `/compact`, on
+permission-mode changes, and on vim-mode toggles. Rapid changes are debounced to 300ms, and a
+slow script gets cancelled if a new update fires while it's still running — so keep it fast.
+
+## How to use it
+
+### The fast path: `/statusline`
+
+```text
+/statusline show model name and context percentage with a progress bar
+```
+
+Claude Code writes a script to `~/.claude/` and wires up `settings.json` for you. This is the
+right default — read the next section to understand what it generated, then hand-edit from there.
+
+### Manual configuration
+
+Add a `statusLine` block to `~/.claude/settings.json` (or a project's `.claude/settings.json`):
+
+```json title="settings.json"
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 2
+  }
+}
+```
+
+`command` runs in a shell, so a script path or an inline one-liner both work:
+
+```json title="settings.json"
+{
+  "statusLine": {
+    "type": "command",
+    "command": "jq -r '\"[\\(.model.display_name)] \\(.context_window.used_percentage // 0)% context\"'"
+  }
+}
+```
+
+A minimal script, using [`jq`](https://jqlang.org/) to pull fields out of the JSON payload:
+
+```bash showLineNumbers title="~/.claude/statusline.sh"
+#!/bin/bash
+input=$(cat)
+
+MODEL=$(echo "$input" | jq -r '.model.display_name')
+DIR=$(echo "$input" | jq -r '.workspace.current_dir')
+PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+
+echo "[$MODEL] 📁 ${DIR##*/} | ${PCT}% context"
+```
+
+```bash
+chmod +x ~/.claude/statusline.sh
+```
+
+<Note type="warning">
+  The `// 0` fallback in the `jq` expression matters: several fields, including
+  `context_window.used_percentage`, are `null` before the first API response and again right
+  after `/compact`. A script that doesn't handle `null` prints a blank or broken line for the
+  first few seconds of every session.
+</Note>
+
+### What data you get
+
+Claude Code sends one JSON object per invocation. The fields that matter for a backend/DevOps
+workflow:
+
+| Field | What it's for |
+|---|---|
+| `model.display_name`, `model.id` | Which model is running |
+| `cwd`, `workspace.current_dir` | Current working directory |
+| `workspace.project_dir` | Where the session was launched, if you've `cd`'d since |
+| `workspace.repo.host/owner/name` | Parsed from the `origin` remote |
+| `cost.total_cost_usd` | Estimated session cost, resets on `/clear` |
+| `cost.total_duration_ms`, `cost.total_api_duration_ms` | Wall-clock vs. time waiting on the API |
+| `cost.total_lines_added`, `cost.total_lines_removed` | Diff size for the session so far |
+| `context_window.used_percentage`, `.remaining_percentage` | Pre-calculated, input-tokens-only |
+| `context_window.context_window_size` | 200k by default, 1M for extended-context models |
+| `rate_limits.five_hour.used_percentage`, `.seven_day.used_percentage` | Pro/Max subscription limits, absent for API-key usage |
+| `session_id` | Stable per session — useful as a cache key, not a PID |
+| `pr.number`, `pr.url`, `pr.review_state` | Open PR for the current branch, if any |
+| `vim.mode` | Only present when vim mode is on |
+
+Git branch and status are **not** in the payload — the docs' own examples shell out to
+`git branch --show-current` and `git diff --numstat` from inside the script, same as you would.
+
+`used_percentage` is computed from input tokens only (`input_tokens + cache_creation_input_tokens
++ cache_read_input_tokens`); it does not include output tokens. If you compute context percentage
+yourself from `context_window.current_usage`, use the same formula or your number won't match
+what Claude Code shows elsewhere.
+
+## Best practices
+
+- **Cache anything that shells out.** `git status` and `git diff` are cheap once, expensive when
+  a script re-running on every message calls them dozens of times a minute. Key the cache file
+  off `session_id` — not `$$` or a PID, which change on every invocation and defeat the point.
+- **Handle absence, not just null.** `workspace.repo`, `pr`, `rate_limits`, and `vim` are entirely
+  *absent* from the JSON outside a git repo, outside an open PR, on API-key billing, or with vim
+  mode off — `jq`'s `// empty` (not `// 0`) is the idiom for "print nothing if this isn't there."
+- **Keep it short.** The status line shares its row with permission prompts and MCP error
+  notifications, which can truncate a long line on a narrow terminal.
+- **Set `refreshInterval` only for time-based data.** Event-driven updates cover model changes,
+  new messages, and compaction; add a timer only if you're rendering a clock or you have
+  background subagents that might change git state while the main session sits idle.
+- **Test with a fixture, not by guessing.** Pipe a minimal JSON blob straight into the script
+  before wiring it into settings — this catches `jq` typos before they show up as a blank bar.
+
+## A real example
+
+A status line built for backend work: model, directory, branch with dirty-state color, and a
+context bar that turns red before you get surprised by a mid-task compaction.
+
+```bash showLineNumbers title="~/.claude/statusline.sh"
+#!/bin/bash
+input=$(cat)
+
+MODEL=$(echo "$input" | jq -r '.model.display_name')
+DIR=$(echo "$input" | jq -r '.workspace.current_dir')
+PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+COST=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
+
+GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; RESET='\033[0m'
+
+if [ "$PCT" -ge 90 ]; then BAR_COLOR="$RED"
+elif [ "$PCT" -ge 70 ]; then BAR_COLOR="$YELLOW"
+else BAR_COLOR="$GREEN"; fi
+
+BRANCH=""
+if git rev-parse --git-dir > /dev/null 2>&1; then
+    BRANCH=$(git branch --show-current 2>/dev/null)
+    DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    [ "$DIRTY" -gt 0 ] && BRANCH="${YELLOW}${BRANCH}*${RESET}" || BRANCH="${GREEN}${BRANCH}${RESET}"
+    BRANCH=" | 🌿 $BRANCH"
+fi
+
+COST_FMT=$(printf '$%.2f' "$COST")
+echo -e "[$MODEL] 📁 ${DIR##*/}${BRANCH} | ${BAR_COLOR}${PCT}%${RESET} ctx | ${COST_FMT}"
+```
+
+Wired up with a `refreshInterval` so cost keeps climbing visibly even while a background
+subagent works and the main session is otherwise idle:
+
+```json title="settings.json"
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "refreshInterval": 5
+  }
+}
+```
+
+At 90% context, the bar goes red before the session gets auto-compacted — the signal to wrap up
+the current step or run `/compact` on your own terms instead of having it happen mid-edit.
+
+<CardGrid>
+  <Card
+    title="Agent Skills →"
+    href="/docs/agent-skills"
+    description="Package repeatable instructions into a SKILL.md Claude can discover and invoke on its own."
+  />
+</CardGrid>

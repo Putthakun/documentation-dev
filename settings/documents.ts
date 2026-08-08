@@ -130,6 +130,54 @@ export const Documents: Paths[] = [
     spacer: true,
   },
   {
+    heading: 'Claude Code',
+    title: 'Slash Commands',
+    href: '/slash-commands',
+  },
+  {
+    title: 'Memory - CLAUDE.md',
+    href: '/claude-md',
+  },
+  {
+    title: 'Context Window',
+    href: '/context-window',
+  },
+  {
+    title: 'Hooks',
+    href: '/hooks',
+  },
+  {
+    title: 'Status Line',
+    href: '/status-line',
+  },
+  {
+    title: 'Agent Skills',
+    href: '/agent-skills',
+  },
+  {
+    title: 'Skills Ecosystem (skills.sh)',
+    href: '/skills-ecosystem',
+  },
+  {
+    title: 'Subagents',
+    href: '/subagents',
+  },
+  {
+    title: 'Agent Teams',
+    href: '/agent-teams',
+  },
+  {
+    title: 'tmux - Terminal Multiplexer',
+    href: '/tmux',
+  },
+  {
+    title: 'Agent Teams with tmux',
+    href: '/agent-teams-tmux',
+  },
+  {
+    spacer: true,
+  },
+  {
     heading: 'Real-world Applications',
     title: 'Building APIs',
     href: '/building-apis',

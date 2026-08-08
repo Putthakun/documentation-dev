@@ -1,0 +1,229 @@
+---
+title: "tmux - Terminal Multiplexer"
+description: Persistent, multi-pane terminal sessions that survive SSH disconnects.
+keywords: ["tmux", "terminal multiplexer", "ssh", "persistent session", "panes", "windows", "screen"]
+---
+
+## What it is
+
+`tmux` (terminal multiplexer) runs your shell sessions inside a background server process
+instead of inside your terminal window. The terminal you're looking at is just a client attached
+to that server. Close the terminal, lose the SSH connection, put your laptop to sleep — the
+session keeps running, and you reattach to exactly where you left it.
+
+That single property solves a problem every backend/DevOps engineer hits early: a long-running
+job (a migration, a build, `tail -f` on a production log) dies the moment the connection that
+started it drops. Without tmux, `nohup` and `&` are the workaround. With tmux, you just don't
+think about it — you SSH back in and `tmux attach`.
+
+The second thing tmux buys you is **panes and windows** — splitting one terminal into several,
+each running its own shell, without opening new terminal emulator windows or new SSH connections.
+
+<Note title="tmux vs screen" type="default">
+  `screen` does roughly the same job and predates tmux. tmux won out because of scriptable panes,
+  a saner config format, and active maintenance. If you SSH into an old box and only `screen` is
+  installed, the mental model transfers directly — `screen -S name` instead of `tmux new -s name`,
+  `Ctrl-a` instead of `Ctrl-b` as the default prefix.
+</Note>
+
+## Core concepts
+
+tmux has a three-level hierarchy. Get this straight and every command reads as "do X to the thing
+at level Y":
+
+<Mermaid chart="graph TD
+  Server[tmux server<br/>one background process] --> S1[Session: deploy]
+  Server --> S2[Session: monitoring]
+  S1 --> W1[Window 0: shell]
+  S1 --> W2[Window 1: logs]
+  W2 --> P1[Pane: tail api.log]
+  W2 --> P2[Pane: tail worker.log]" />
+
+- **Server** — one background process per machine, started automatically by the first `tmux`
+  command. You rarely interact with it directly.
+- **Session** — a named workspace, typically one per project or task (`deploy`, `monitoring`).
+  Detaching leaves it running; attaching reconnects to it. This is the unit that survives
+  disconnects.
+- **Window** — a full-screen tab within a session, like a browser tab. Each window has its own
+  name and can hold one or many panes.
+- **Pane** — a subdivision of a window, each running an independent shell. Splitting panes is how
+  you watch several things at once without extra windows or connections.
+
+Every session, window, and pane has an index or name, and every tmux command targets one of them
+with a **target syntax**: `session:window.pane` (e.g. `deploy:1.0`). Most day-to-day usage never
+types this — you navigate with keybindings instead — but it's what `-t` flags take when you script
+tmux.
+
+## How to use it
+
+Every tmux command is either typed at a shell prompt (`tmux new -s name`) or sent as a
+**keybinding after a prefix key**. The default prefix is `Ctrl-b`: press it, release it, then
+press the command key. `Ctrl-b %` means "press Ctrl-b, let go, then press `%`" — not all three at
+once.
+
+### Sessions
+
+```bash
+tmux new -s deploy          # create and attach a new session named "deploy"
+tmux ls                     # list all sessions on this server
+tmux attach -t deploy       # attach to an existing session (tmux a -t deploy also works)
+tmux kill-session -t deploy # kill a session and everything in it
+```
+
+| Keybinding | Action |
+|---|---|
+| `prefix d` | Detach from the current session (it keeps running) |
+| `prefix $` | Rename the current session |
+| `prefix s` | Interactive session picker |
+
+### Windows
+
+| Keybinding | Action |
+|---|---|
+| `prefix c` | Create a new window |
+| `prefix ,` | Rename the current window |
+| `prefix n` / `prefix p` | Next / previous window |
+| `prefix 0`–`9` | Jump to window by number |
+| `prefix w` | Interactive window picker |
+| `prefix &` | Kill the current window (asks for confirmation) |
+
+### Panes
+
+| Keybinding | Action |
+|---|---|
+| `prefix %` | Split pane vertically — new pane to the **right** |
+| `prefix "` | Split pane horizontally — new pane **below** |
+| `prefix` arrow key | Move focus to the pane in that direction |
+| `prefix o` | Cycle focus to the next pane |
+| `prefix q` | Briefly show pane numbers (then press a number to jump) |
+| `prefix z` | Zoom the current pane to fullscreen (toggle) |
+| `prefix x` | Kill the current pane (asks for confirmation) |
+| `prefix Ctrl-arrow` | Resize the current pane |
+
+<Note title="The % and &quot; split direction is not a typo" type="warning">
+  `%` splits **horizontally arranged** panes (side by side, divided by a vertical line) and `"`
+  splits **vertically arranged** panes (stacked, divided by a horizontal line). tmux names the
+  split by the axis the divider runs along, which is the opposite of what most people guess on
+  first read. It's worth memorizing once rather than re-deriving it every time.
+</Note>
+
+### Copy mode
+
+Your mouse scroll wheel won't scroll tmux's buffer by default. Enter copy mode with `prefix [`,
+navigate with arrow keys or vi bindings (`j`/`k`), and press `q` to exit. With `set -g mouse on`
+in your config (below), the mouse wheel and click-to-select-pane work as expected, which is the
+first thing most people turn on.
+
+## A starter `~/.tmux.conf`
+
+tmux reads `~/.tmux.conf` on startup (or on `prefix :` then `source-file ~/.tmux.conf` to reload
+without restarting). This is a reasonable starting point — comment out anything you don't want:
+
+```bash showLineNumbers title="~/.tmux.conf"
+# Remap prefix from Ctrl-b to Ctrl-a — closer to the home row, and matches screen.
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix
+
+# Mouse support: click to select panes, scroll to scroll, drag to resize.
+set -g mouse on
+
+# Start window and pane numbering at 1, not 0 — matches the keyboard row.
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Renumber windows automatically when one is closed.
+set -g renumber-windows on
+
+# Scrollback buffer size (default is only 2000 lines).
+set -g history-limit 50000
+
+# Faster key repetition — default escape delay hurts vim/nvim inside tmux.
+set -sg escape-time 0
+
+# More intuitive split keybindings, opened in the current pane's directory.
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind c new-window -c "#{pane_current_path}"
+
+# Reload config without restarting the server.
+bind r source-file ~/.tmux.conf \; display "Config reloaded"
+
+# Status bar: session name left, host + time right.
+set -g status-style bg=black,fg=white
+set -g status-left "#[bold]#S "
+set -g status-right "%H:%M  #h"
+
+# Correct terminal type for full color support in vim/nvim and other TUIs.
+set -g default-terminal "tmux-256color"
+```
+
+<Note title="Why -c '#{pane_current_path}' matters" type="success">
+  Without it, every new pane and window opens in the directory tmux itself started in — not the
+  directory you've since `cd`'d into. This is the single most common tmux annoyance, and the fix
+  is these three lines.
+</Note>
+
+## Best practices
+
+- **Name sessions for what they're for**, not for the date or a number — `deploy`, `db-migrate`,
+  `incident-2024-08` are all things you'll recognize a week later; `1` and `2` are not.
+- **One session per task or project**, not one giant session with forty windows. `tmux ls` should
+  read like a table of contents.
+- **Start long or risky jobs inside tmux by default** on any remote box — migrations, deploys,
+  data backfills. Losing the SSH connection five minutes into a two-hour job is a bad way to learn
+  this lesson.
+- **Detach, don't close the terminal.** `prefix d` leaves the session running; closing the
+  terminal window (or losing the connection) also leaves it running, but detaching is the
+  intentional version and doesn't risk killing a foreground process with `Ctrl-C` on the way out.
+- **Kill sessions you're done with.** `tmux ls` accumulates forgotten sessions fast, each one a
+  live shell (and possibly a live process) nobody's watching.
+- **Turn mouse mode on early** if you're new to tmux — it removes the biggest friction (scrolling,
+  pane selection) while you build keybinding muscle memory, and doesn't stop you from using the
+  keyboard shortcuts alongside it.
+
+## A real example
+
+SSH into a server to run a migration and keep an eye on logs at the same time, in a way that
+survives your laptop going to sleep:
+
+```bash
+ssh deploy@db-primary
+tmux new -s migrate          # start a named session
+```
+
+Split the window so the migration and the log tail run side by side:
+
+```
+prefix %                      # split vertically → two panes, side by side
+```
+
+In the left pane:
+
+```bash
+make migrate-up
+```
+
+In the right pane (`prefix →` or `prefix o` to switch focus):
+
+```bash
+tail -f /var/log/app/migration.log
+```
+
+Now detach with `prefix d` and close the laptop. Later, from anywhere:
+
+```bash
+ssh deploy@db-primary
+tmux attach -t migrate        # back exactly where you left it, migration still running
+```
+
+If the migration finished while you were away, the log tail shows the whole history because it's
+still in the pane's scrollback — nothing was lost by not watching it live.
+
+<CardGrid>
+  <Card
+    title="Agent Teams with tmux →"
+    href="/docs/agent-teams-tmux"
+    description="Using tmux panes to run and watch several Claude Code agent sessions side by side."
+  />
+</CardGrid>

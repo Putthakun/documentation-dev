@@ -1,0 +1,159 @@
+---
+title: "Skills Ecosystem (skills.sh)"
+description: Evaluating and safely adopting third-party Agent Skills instead of only writing your own.
+keywords: ["skills.sh", "agent skills marketplace", "agentskills.io", "third-party claude code skills", "npx skills"]
+---
+
+## What it is
+
+[Agent Skills](/docs/agent-skills) — a folder with a `SKILL.md` — is an open, published standard
+at [agentskills.io](https://agentskills.io), not something exclusive to Claude Code. Any AI
+coding tool that implements the spec can load the same skill folder. That portability is what
+made a third-party ecosystem possible: people write a skill once and share it as a git repo,
+the same way you'd share an npm package or a Terraform module.
+
+**skills.sh** is one such directory — a catalog and leaderboard for skill packages, built by
+Vercel around a companion CLI (`npx skills`). It is a **third-party project, not an official
+Anthropic product.** Treat this page's specifics about it as informational rather than
+authoritative: it's a young, fast-moving space, and the safe-adoption habits below matter more
+than any particular tool's current feature set.
+
+<Note type="warning">
+  This page is deliberately less prescriptive than the previous one. Anthropic's own docs cover
+  the *mechanism* — a `SKILL.md` with frontmatter, how it's discovered and loaded — in detail and
+  that's what [Agent Skills](/docs/agent-skills) is grounded in. The marketplace layer on top is
+  community-run, changes shape often, and isn't something to take on faith from a training
+  snapshot. Verify current specifics (install flow, curation policy, what's popular) directly
+  before relying on them.
+</Note>
+
+The core idea worth taking away, regardless of which specific marketplace tool is current by the
+time you read this: **installing a third-party skill means putting someone else's instructions —
+and potentially someone else's scripts — directly into Claude's context and execution path.**
+That's a different trust boundary than installing a library, and it's the reason this page exists
+separately from the mechanics page.
+
+## How to use it
+
+### The general shape of installing a third-party skill
+
+Regardless of the specific marketplace, the pattern is the same because it follows directly from
+how skills are discovered (see [Where skills live](/docs/agent-skills#where-skills-live)):
+
+1. Find a skill in a directory or a public git repo.
+2. The install step copies (or symlinks) its `SKILL.md` and any supporting files into
+   `~/.claude/skills/<name>/` (personal, available everywhere) or `.claude/skills/<name>/`
+   (project-scoped, checked into the repo).
+3. Claude Code picks it up — either immediately, if the skills directory already existed when the
+   session started, or after a restart if it's a brand-new top-level skills folder.
+
+A CLI installer like `npx skills add <owner>/<repo>` automates step 2, but nothing about it is
+magic: it's still just files landing in a directory Claude Code already watches. You can achieve
+the identical result by cloning a repo and copying a folder yourself, which is worth remembering
+when you want to inspect before installing rather than trusting an installer's default behavior.
+
+### Browsing and discovery
+
+Marketplaces built on the Agent Skills standard generally offer:
+
+- A searchable directory of skills, often with install counts or a leaderboard as a rough quality
+  signal (rough — install count reflects popularity, not correctness or safety).
+- A `find-skills`-style skill of their own, so Claude can search the marketplace for you from
+  inside a session and suggest one that matches what you're trying to do.
+- No formal review gate on community submissions, in contrast to Anthropic's own small,
+  manually-curated skill collection at
+  [github.com/anthropics/skills](https://github.com/anthropics/skills). That distinction —
+  curated-and-small vs. open-and-large — is the one to keep in mind when deciding how much
+  scrutiny a given skill deserves before installing it.
+
+### Publishing your own
+
+Because a skill is just a directory with `SKILL.md` in a git repo, "publishing" is close to
+"push it somewhere public and point people at it." A marketplace built around install telemetry
+can list a skill automatically the first time people start installing it from your repo, with no
+separate submission form — which cuts the other way too: **listing is not vetting.** Nothing
+about appearing in a directory implies anyone reviewed the skill's contents.
+
+If you're publishing rather than only consuming: keep `allowed-tools` as narrow as the skill
+genuinely needs (see [Agent Skills](/docs/agent-skills#frontmatter-fields)), document what the
+skill does and doesn't touch in plain language above the frontmatter's technical fields, and
+avoid bundling scripts that reach the network unless the `SKILL.md` says so explicitly — a
+reviewer skimming your skill before installing it should not have to read a bundled Python script
+line by line to find out it phones home.
+
+## Best practices — evaluating a skill before you trust it
+
+This is the part that matters more than any specific marketplace's UI. A skill is prompt content
+plus, often, executable scripts — evaluate it the way you'd evaluate a shell script someone
+posted in a forum, not the way you'd evaluate a signed package from a language's official
+registry.
+
+<Note type="danger">
+  A skill can request `allowed-tools` that pre-approve commands **without a permission prompt**,
+  and any bundled script runs with whatever access the skill grants itself. Read `SKILL.md`
+  before installing — don't skip it because "it's just a markdown file."
+</Note>
+
+- **Read `SKILL.md` in full before installing, especially the `allowed-tools` /
+  `disallowed-tools` frontmatter.** That field is the skill pre-authorizing itself to run
+  specific commands without asking you each time. A skill that only needs to read files has no
+  business requesting broad `Bash` access.
+- **Check for bundled scripts, and read them too.** A `scripts/` directory means the skill can
+  execute arbitrary code, not just prompt Claude with text. Treat an unreviewed script exactly
+  like you'd treat a `curl | bash` from an unfamiliar source.
+- **Prefer project-scoped installs (`.claude/skills/`) over personal (`~/.claude/skills/`) for
+  anything you haven't fully vetted.** A project skill is visible in the repo, reviewable in a
+  diff, and scoped to that one codebase — it can't quietly follow you into every other project
+  the way a personal skill does.
+- **Check what the skill's own permission trust means for you.** Project skills only get their
+  `allowed-tools` grant *after* you accept the workspace trust dialog for that folder — the same
+  gate that governs `.claude/settings.json` permission rules. Don't wave that dialog through
+  without having actually read the skill first.
+- **Prefer small, single-purpose skills over large bundled collections.** A repo advertising
+  "300+ skills" is 300 things you didn't individually review. Install the one you need, not the
+  bundle.
+- **Watch for prompt injection risk in what a skill causes Claude to read.** A skill that fetches
+  a web page, a PR description, or an issue body and feeds it back into the prompt is exposing
+  Claude to text from a source neither of you fully control. This isn't unique to third-party
+  skills, but a skill you didn't write is a second, unaudited place that pattern can appear.
+- **Re-check after updates.** A skill you vetted once and left installed can change contents on
+  the next `git pull` or reinstall. Treat "I checked it before" as expiring, the same way you'd
+  treat a pinned dependency you haven't actually re-read since.
+
+## A real example
+
+A defensible way to try a skill you found on a marketplace without fully committing to it:
+
+<Step>
+  <StepItem title="Install it, but scoped to a scratch project">
+    Clone the skill's repo yourself (skip the installer CLI the first time) into a throwaway
+    project's `.claude/skills/<name>/`, not `~/.claude/skills/`. This keeps the blast radius to a
+    project you're willing to lose.
+  </StepItem>
+  <StepItem title="Read SKILL.md before accepting workspace trust">
+    Specifically check the `allowed-tools` and `disallowed-tools` fields, and open any file under
+    `scripts/`. If either grants more than the skill's stated purpose needs, stop here.
+  </StepItem>
+  <StepItem title="Trigger it explicitly, don't let it auto-invoke yet">
+    If the skill doesn't already set `disable-model-invocation: true`, invoke it by name
+    (`/skill-name`) the first few times rather than letting Claude discover it on its own, so you
+    see exactly what it does before it can fire on a guess.
+  </StepItem>
+  <StepItem title="Promote deliberately">
+    Only after you've watched it run a few times and read its output, move it to
+    `~/.claude/skills/` for cross-project use, or commit the project-scoped copy so teammates
+    inherit the same reviewed version instead of each installing their own from the marketplace.
+  </StepItem>
+</Step>
+
+This is slower than `npx skills add` and running with it — deliberately. The install command
+solves discovery; it doesn't solve trust, and nothing in the current tooling substitutes for
+reading what you're about to give tool access to.
+
+<CardGrid>
+  <Card
+    title="Subagents →"
+    href="/docs/subagents"
+    description="Delegate work to an isolated context window with its own tools, model, and system prompt."
+  />
+</CardGrid>

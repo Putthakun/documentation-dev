@@ -1,0 +1,182 @@
+---
+title: Subagents
+description: Delegating work to an isolated context window with its own system prompt, tools, and model.
+keywords: ["claude code subagents", ".claude/agents", "subagent frontmatter", "context isolation", "agent tool"]
+---
+
+## What it is
+
+A subagent is a specialized assistant that runs a task in **its own context window**, with its
+own system prompt, its own tool access, and its own permissions — separate from your main
+conversation. When Claude spots a task matching a subagent's `description`, it delegates: the
+subagent works independently and returns a summary, while everything it read or ran along the way
+stays out of your main context.
+
+This solves a specific problem: exploring a codebase, running a test suite, or grepping through
+logs can produce thousands of lines you'll never look at directly and don't want permanently
+occupying your context window. A subagent absorbs that noise and hands back only the finding.
+
+<Mermaid chart="graph TD
+  M[Main conversation] -->|delegates via Agent tool| S[Subagent: own context window]
+  S -->|reads files, runs commands,<br/>greps logs — all in ITS context| S
+  S -->|returns summary only| M
+  M -->|main context stays small| M2[Main conversation continues]" />
+
+Claude Code ships three built-in subagents you'll see used automatically: **Explore** (read-only,
+codebase search), **Plan** (read-only research used during plan mode), and **general-purpose**
+(full tool access, for tasks that need both exploration and edits). You define your own for
+anything you keep delegating the same way, with the same instructions, across sessions.
+
+## How to use it
+
+### Write one
+
+Subagents are markdown files with YAML frontmatter, stored in `.claude/agents/` (project-scoped)
+or `~/.claude/agents/` (personal, every project). The fastest way to get a well-formed one is to
+describe it and let Claude write the file:
+
+```text
+Create a personal code-improver subagent in ~/.claude/agents/ that scans
+files and suggests improvements for readability, performance, and best
+practices. Make it read-only and have it use Sonnet.
+```
+
+Which produces something like:
+
+```markdown title="~/.claude/agents/code-improver.md"
+---
+name: code-improver
+description: Scans files and suggests improvements for readability, performance, and best practices. Use after writing or modifying code.
+tools: Read, Grep, Glob
+model: sonnet
+---
+
+You are a code improvement specialist. For each issue you find, explain
+the problem, show the current code, and provide an improved version.
+```
+
+The body is the subagent's **entire** system prompt — a subagent doesn't inherit Claude Code's
+default system prompt, only this file plus basic environment info like the working directory.
+
+### Frontmatter fields
+
+Only `name` and `description` are required.
+
+| Field | Purpose |
+|---|---|
+| `name` | Unique identifier (lowercase, hyphens). No colons — those are reserved for plugin-scoped names like `my-plugin:reviewer`. |
+| `description` | What the subagent is for — this is what Claude matches against a task to decide whether to delegate. |
+| `tools` | Allowlist of tools the subagent may use. Omit to inherit everything available to subagents. |
+| `disallowedTools` | Denylist, applied *before* `tools` is resolved against what remains. |
+| `model` | `sonnet`, `opus`, `haiku`, `fable`, a full model ID, or `inherit` (default). Route cheap, well-scoped work to a smaller model here. |
+| `permissionMode` | `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, or `plan`. |
+| `skills` | Skills whose **full content** preloads into the subagent's context at startup — see [Agent Skills](/docs/agent-skills). |
+| `mcpServers` | MCP servers scoped to just this subagent, connected on start and torn down on finish. |
+| `maxTurns` | Hard cap on agentic turns before the subagent stops. |
+| `isolation: worktree` | Runs the subagent against a temporary git worktree instead of your working copy. |
+| `memory` | `user`, `project`, or `local` — gives the subagent a persistent directory it can read/write across sessions. |
+
+### How delegation happens
+
+Three escalating ways to trigger a subagent, from a suggestion Claude can ignore to a session-wide
+default:
+
+1. **Natural language** — name it in your prompt (`"use the test-runner subagent to fix failing
+   tests"`); Claude decides whether to actually delegate.
+2. **@-mention** — `@code-reviewer look at the auth changes` guarantees that specific subagent
+   runs for this task rather than leaving the choice to Claude.
+3. **Session-wide** — `claude --agent code-reviewer` (or an `"agent"` key in
+   `.claude/settings.json`) makes the subagent's system prompt, tools, and model the main
+   session's defaults for the whole session.
+
+A subagent inherits the tools available to subagents generally, narrowed by whatever `tools` /
+`disallowedTools` you set, and further narrowed if it runs in the background (the default as of
+recent versions) — background subagents keep a smaller built-in tool set than foreground ones,
+though every permission prompt they hit still surfaces in your main session for you to approve or
+deny.
+
+## Best practices
+
+- **Write a specific `description`.** It's the only thing Claude matches against when deciding
+  whether to delegate automatically — vague descriptions mean vague (or absent) delegation. Add
+  "use proactively" if you want Claude to reach for it without being asked.
+- **Restrict `tools` to what the task actually needs.** A subagent that only searches code should
+  not have `Write` or `Edit` — this is the same instinct as least-privilege IAM policies, applied
+  to an agent instead of a service account.
+- **Route to a cheaper model when the task doesn't need your main model's reasoning.** Log
+  triage, mechanical greps, and rote summarization are good candidates for `model: haiku`.
+- **Check subagent definitions into version control** when they're project-specific — a
+  teammate's session should get the same restricted, well-scoped researcher you built, not have
+  to reconstruct it from memory.
+- **Don't run everything through a subagent.** A quick file read or a two-line edit belongs in
+  the main conversation; delegating it just adds round-trip overhead for no isolation benefit.
+  Reach for a subagent when the *volume* of intermediate output — not the importance of the task
+  — is what you're trying to keep out of your main context.
+
+### Subagents vs. skills vs. plain instructions
+
+<Mermaid chart="graph TD
+  Q{What's the problem?} -->|I keep re-explaining a procedure| SK[Skill: reusable instructions,<br/>same context]
+  Q -->|This would flood my context<br/>with output I won't reuse| SA[Subagent: separate context,<br/>own tools/model]
+  Q -->|One-off, small, this session only| PI[Just say it inline]" />
+
+The deciding question is **volume of intermediate output**, not complexity. A skill's content
+loads into your *existing* context and stays there. A subagent gets an entirely separate context
+window and returns only a summary — that's the isolation a big `grep` sweep or a full test-suite
+run actually needs. A one-off instruction that won't recur isn't worth formalizing as either.
+
+They compose rather than substitute for each other: a skill with `context: fork` runs its
+instructions inside a subagent for isolation, and a subagent's `skills:` field preloads skill
+content as reference material for that subagent's system prompt. See
+[Agent Skills](/docs/agent-skills#skills-vs-slash-commands-subagents-and-mcp) for the full
+comparison table including MCP.
+
+## A real example
+
+A read-only database subagent, scoped so it can query but never mutate — a `PreToolUse` hook
+enforces the boundary at the command level rather than relying on the system prompt alone:
+
+```markdown title=".claude/agents/db-reader.md"
+---
+name: db-reader
+description: Execute read-only database queries for debugging and investigation. Use when the user needs to check data without modifying it.
+tools: Bash
+model: haiku
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "./scripts/validate-readonly-query.sh"
+---
+
+You investigate data issues by running read-only SQL queries. Explain what you're
+querying and why before running it. Never attempt a write — if the task requires
+one, say so and stop.
+```
+
+```bash showLineNumbers title="scripts/validate-readonly-query.sh"
+#!/bin/bash
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+
+if echo "$COMMAND" | grep -iE '\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE)\b' > /dev/null; then
+  echo "Blocked: Only SELECT queries are allowed" >&2
+  exit 2
+fi
+
+exit 0
+```
+
+Two layers of restriction here: `tools: Bash` (nothing else, so it can't reach for `Write`) plus
+a hook that inspects every Bash command before it runs. The system prompt asks nicely; the hook
+is what actually enforces it — the same layered-trust habit from [evaluating third-party
+skills](/docs/skills-ecosystem), applied to something you wrote yourself.
+
+<CardGrid>
+  <Card
+    title="Agent Teams →"
+    href="/docs/agent-teams"
+    description="Coordinate multiple sessions Claude spawns and supervises, each with its own independent context."
+  />
+</CardGrid>
