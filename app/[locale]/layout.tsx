@@ -1,10 +1,15 @@
 import { type ReactNode } from 'react'
 import { type Metadata } from 'next'
+import { hasLocale } from 'next-intl'
+import { NextIntlClientProvider } from 'next-intl'
+import { getMessages } from 'next-intl/server'
+import { notFound } from 'next/navigation'
 import { Inter } from 'next/font/google'
 import { GoogleTagManager } from '@next/third-parties/google'
 
 import { Footer } from '@/components/navigation/footer'
 import { Navbar } from '@/components/navigation/navbar'
+import { routing } from '@/i18n/routing'
 import { Providers } from '@/providers'
 import { Settings } from '@/types/settings'
 
@@ -52,16 +57,32 @@ export const metadata: Metadata = {
   },
 }
 
-export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
+export function generateStaticParams() {
+  return routing.locales.map((locale) => ({ locale }))
+}
+
+interface LocaleLayoutProps {
+  children: ReactNode
+  params: Promise<{ locale: string }>
+}
+
+export default async function LocaleLayout({ children, params }: LocaleLayoutProps) {
+  const { locale } = await params
+  if (!hasLocale(routing.locales, locale)) notFound()
+
+  const messages = await getMessages()
+
   return (
-    <html data-scroll-behavior="smooth" lang="en" suppressHydrationWarning>
+    <html data-scroll-behavior="smooth" lang={locale} suppressHydrationWarning>
       {Settings.gtmconnected && <GoogleTagManager gtmId={Settings.gtm} />}
       <body className={`${inter.variable} font-regular antialiased`}>
-        <Providers>
-          <Navbar />
-          <main className="h-auto px-5 sm:px-8">{children}</main>
-          <Footer />
-        </Providers>
+        <NextIntlClientProvider messages={messages}>
+          <Providers>
+            <Navbar />
+            <main className="h-auto px-5 sm:px-8">{children}</main>
+            <Footer />
+          </Providers>
+        </NextIntlClientProvider>
       </body>
     </html>
   )
