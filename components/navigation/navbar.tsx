@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import { useTranslations } from 'next-intl'
 import { LuArrowUpRight, LuGithub } from 'react-icons/lu'
 
 import { Anchor } from '@/components/anchor'
@@ -13,6 +14,8 @@ import { ModeToggle } from '@/components/ui/theme-toggle'
 import { GitHubLink, Navigations } from '@/settings/navigation'
 
 export function Navbar() {
+  const t = useTranslations('navbar')
+
   return (
     <nav className="bg-opacity-5 sticky top-0 z-50 mx-auto flex h-16 w-full items-center justify-between border-b p-1 px-2 backdrop-blur-xl backdrop-filter sm:p-3 md:gap-2 md:px-4">
       <div className="flex items-center gap-5">
@@ -28,12 +31,12 @@ export function Navbar() {
         <div className="flex gap-2 sm:ml-0">
           {GitHubLink.href && (
             <Link
-              aria-label="View the repository on GitHub"
+              aria-label={t('githubLink')}
               className={buttonVariants({ variant: 'outline', size: 'icon-lg' })}
               href={GitHubLink.href}
               rel="noopener noreferrer"
               target="_blank"
-              title="View the repository on GitHub"
+              title={t('githubLink')}
             >
               <LuGithub className="size-4" />
             </Link>
