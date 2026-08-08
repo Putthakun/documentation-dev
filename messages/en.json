@@ -1,0 +1,9 @@
+{
+  "navbar": {
+    "docsLink": "Docs",
+    "githubLink": "View the repository on GitHub"
+  },
+  "search": {
+    "placeholder": "Search..."
+  }
+}

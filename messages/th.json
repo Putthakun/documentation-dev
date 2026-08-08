@@ -1,0 +1,9 @@
+{
+  "navbar": {
+    "docsLink": "เอกสาร",
+    "githubLink": "ดู repository บน GitHub"
+  },
+  "search": {
+    "placeholder": "ค้นหา..."
+  }
+}
