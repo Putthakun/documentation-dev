@@ -3,7 +3,7 @@ import {
   type AppRouterInstance,
   type NavigateOptions,
 } from 'next/dist/shared/lib/app-router-context.shared-runtime'
-import { useRouter as useNextRouter } from 'next/navigation'
+import { useRouter as useNextRouter } from '@/i18n/navigation'
 
 import { useSetFinishViewTransition } from './transition-context'
 
@@ -66,6 +66,11 @@ export function useTransitionRouter() {
   return useMemo<TransitionRouter>(
     () => ({
       ...router,
+      // next-intl's useRouter wraps the underlying Next.js router and forwards
+      // all of its properties at runtime, but its declared type omits
+      // `bfcacheId` (unused in this app) — fall back to keep this assignable
+      // to `AppRouterInstance` without widening the type or using `any`.
+      bfcacheId: (router as unknown as { bfcacheId?: string }).bfcacheId ?? '',
       push,
       replace,
     }),

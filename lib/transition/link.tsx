@@ -1,6 +1,7 @@
 import { type UrlObject } from 'node:url'
 import { type ComponentProps, type MouseEvent, useCallback } from 'react'
-import NextLink from 'next/link'
+
+import { Link as LocaleLink } from '@/i18n/navigation'
 
 import { useTransitionRouter } from './use-transition-router'
 
@@ -32,7 +33,7 @@ function shouldPreserveDefault(e: MouseEvent<HTMLAnchorElement>): boolean {
 const formatUrl = (url: string | UrlObject): string =>
   typeof url === 'string' ? url : new URL(url.pathname || '', window.location.href).toString()
 
-export function Link(props: ComponentProps<typeof NextLink>) {
+export function Link(props: ComponentProps<typeof LocaleLink>) {
   const router = useTransitionRouter()
 
   const { as, href, onClick, replace, scroll, ...rest } = props
@@ -61,5 +62,5 @@ export function Link(props: ComponentProps<typeof NextLink>) {
     [onClick, href, as, replace, scroll, router]
   )
 
-  return <NextLink {...rest} as={as} href={href} onClick={handleClick} />
+  return <LocaleLink {...rest} as={as} href={href} onClick={handleClick} />
 }

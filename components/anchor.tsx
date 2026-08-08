@@ -1,7 +1,7 @@
 'use client'
 
 import { type ComponentProps } from 'react'
-import { usePathname } from 'next/navigation'
+import { usePathname } from '@/i18n/navigation'
 
 import { Link } from '@/lib/transition'
 import { cn } from '@/lib/utils'

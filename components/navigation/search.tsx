@@ -1,6 +1,7 @@
 'use client'
 
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { useLocale } from 'next-intl'
 import { LuFileText, LuSearch } from 'react-icons/lu'
 
 import { Anchor } from '@/components/anchor'
@@ -14,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { getPathname } from '@/i18n/navigation'
 import { advanceSearch, cn, debounce, highlight, type search } from '@/lib/utils'
 import { Documents } from '@/settings/documents'
 
@@ -26,6 +28,7 @@ interface Document {
 }
 
 export function Search() {
+  const locale = useLocale()
   const [searchedInput, setSearchedInput] = useState('')
   const [isOpen, setIsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -47,7 +50,7 @@ export function Search() {
       if (isOpen && event.key === 'Enter' && results.length > 2) {
         const selected = results[0]
         if ('href' in selected) {
-          window.location.href = `/docs${selected.href}`
+          window.location.href = getPathname({ locale, href: `/docs${selected.href}` })
           setIsOpen(false)
         }
       }
