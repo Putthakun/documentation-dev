@@ -1,0 +1,148 @@
+---
+title: Context Window
+description: context ของ Claude Code เต็มขึ้นอย่างไรระหว่างเซสชัน และวิธีจัดการมัน
+keywords: ["context window", "claude code compaction", "/compact", "/clear", "auto-compact", "token usage"]
+---
+
+## คืออะไร
+
+context window คือทุกสิ่งที่ Claude "จำได้" สำหรับเซสชันปัจจุบัน: system prompt, `CLAUDE.md` และ
+auto memory ของคุณ, รายการ MCP tool, ทุกไฟล์ที่มันอ่าน, ทุกคำตอบที่มันให้, output ของ hook, สรุปจาก
+subagent — ทั้งหมดนับเป็น token ทั้งหมดถูกส่งกลับไปยังโมเดลซ้ำในทุกข้อความ นี่คือ context window
+เดียวกับที่ครอบคลุมไว้ในเชิงทั่วไปสำหรับตัวโมเดลเองใน API — สิ่งที่เฉพาะกับ Claude Code คือ *อะไร
+ที่เติมเข้าไปโดยอัตโนมัติก่อนที่คุณจะพิมพ์อะไรเลย* และมันทำอะไรเมื่อเริ่มจะหมด
+
+## สิ่งที่โหลดก่อนคุณพิมพ์คำแรก
+
+สัดส่วนที่น่าแปลกใจของ window ถูกใช้ไปก่อน prompt แรกของคุณด้วยซ้ำ:
+
+- System prompt
+- Auto memory (`MEMORY.md` จำกัดที่ 200 บรรทัดแรกหรือ 25KB)
+- ข้อมูลสภาพแวดล้อม (cwd, platform, shell, git status)
+- ชื่อ MCP tool (schema ยังคง deferred และโหลดตามต้องการ ไม่ใช่ล่วงหน้า)
+- คำอธิบาย skill (บรรทัดเดียวต่อ skill เพื่อให้ Claude รู้ว่าเรียกอะไรได้บ้าง)
+- `CLAUDE.md` และไฟล์ `.claude/rules/*.md` ที่ไม่ได้จำกัดขอบเขต
+
+<Mermaid chart="graph LR
+  A[Session starts] --> B[System prompt + env info]
+  B --> C[CLAUDE.md + auto memory loaded]
+  C --> D[MCP tool names + skill descriptions]
+  D --> E[Your first prompt]
+  E --> F[Each file read / tool call adds tokens]
+  F --> G{Approaching<br/>context limit?}
+  G -->|No| F
+  G -->|Yes| H[Auto-compact: conversation<br/>summarized, key files reload]
+  H --> F" />
+
+จากจุดนั้นเป็นต้นไป ทุกไฟล์ที่ Claude อ่าน, ทุกผลลัพธ์ของ tool, ทุกกฎที่จำกัดขอบเขตตาม path ที่
+ทำงานเพราะคุณแตะไฟล์ที่ตรงกัน — ทั้งหมดจะสะสมเพิ่มขึ้นเรื่อยๆ ไม่มีอะไรทำให้ window เล็กลงเองเลย
+นอกจาก compaction
+
+## การเช็คการใช้งาน
+
+รัน `/context` เพื่อดูรายละเอียดแบบสดที่จัดหมวดหมู่ว่าอะไรกำลังกิน window ของคุณอยู่ตอนนี้ —
+รวมถึงไฟล์ CLAUDE.md และ memory ไหนที่โหลดแล้ว — พร้อมคำแนะนำในการลดขนาด `/usage` แสดงจำนวน token
+และ (สำหรับการใช้งานแบบเก็บเงินผ่าน API) ค่าใช้จ่ายโดยประมาณเป็นดอลลาร์สำหรับเซสชันนั้น ถ้าอยาก
+เห็นการใช้งานแบบต่อเนื่องแทนที่จะเรียกดูเมื่อต้องการ status line สามารถตั้งค่าให้แสดงมันได้ (ดู
+[Status Line](/docs/status-line))
+
+## `/compact` และ auto-compact
+
+`/compact` จะแทนที่ประวัติบทสนทนาด้วยสรุปแบบมีโครงสร้าง เพื่อคืนพื้นที่ในขณะที่พยายามเก็บสิ่งที่
+สำคัญไว้ คุณสามารถกำหนดทิศทางว่าให้เก็บอะไรได้:
+
+```bash
+/compact focus on the auth bug fix
+```
+
+Claude Code ยัง compact **อัตโนมัติ** เมื่อบทสนทนาใกล้ถึงขีดจำกัด context ของโมเดล — เป็นการสรุป
+แบบเดียวกัน เพียงแต่ถูกทริกเกอร์ให้คุณแทนที่จะทำเอง เพื่อไม่ให้ context window ที่เต็มไปจบเซสชันของ
+คุณ ระดับความเต็มที่มันปล่อยให้เกิดก่อนจะ compact คือ **auto-compact window** ปรับได้ด้วย
+`/autocompact 500k` (รับจำนวน token ธรรมดา, suffix แบบ `k`/`M`, หรือตัวเลขเปล่าที่ถือเป็นหลักพัน)
+ถ้าไม่ได้ตั้งอะไรไว้ Claude Code จะ compact เมื่อบทสนทนาถึงขีดจำกัด context ของโมเดล
+
+### สิ่งที่รอดจาก compaction
+
+ไม่ใช่ทุกอย่างจะโหลดกลับมาแบบเดียวกันหลัง `/compact`:
+
+| โหลดผ่าน | หลัง compaction |
+|---|---|
+| System prompt, output style | ไม่เปลี่ยนแปลง — ไม่เคยเป็นส่วนหนึ่งของ message history |
+| CLAUDE.md ที่ root โปรเจกต์, rules ที่ไม่จำกัดขอบเขต | ฉีดกลับจากดิสก์ |
+| Auto memory | ฉีดกลับจากดิสก์ |
+| Rules ที่มี `paths:` ใน frontmatter | หายไปจนกว่าจะมีไฟล์ที่ตรงถูกอ่านอีกครั้ง |
+| CLAUDE.md ที่ซ้อนอยู่ในไดเรกทอรีย่อย | หายไปจนกว่าจะมีไฟล์ในไดเรกทอรีย่อยนั้นถูกอ่านอีกครั้ง |
+| เนื้อหา skill ที่ถูกเรียกใช้ | ฉีดกลับ โดยจำกัดจำนวนต่อ skill และรวม — ตัวเก่าสุดถูกตัดทิ้งก่อน |
+| Hooks | ไม่เกี่ยวข้อง — hooks คือโค้ด ไม่ใช่ context |
+
+ผลที่ตามมาในทางปฏิบัติ: คำสั่งที่คุณพูดออกมาแค่ในแชทเฉยๆ หรือกฎที่จำกัดขอบเขตตาม path ที่ไม่ได้
+ตรงกับไฟล์ไหนมาสักพัก อาจหายไปเงียบๆ หลัง compaction ถ้าอยากให้มันรอดต้องใส่ไว้ใน `CLAUDE.md` ที่
+root โปรเจกต์ของคุณ
+
+## `/compact` เทียบกับ `/clear`
+
+ทั้งสองแก้ปัญหาคนละอย่างกัน และเผลอเลือกผิดได้ง่าย:
+
+| | `/compact` | `/clear` |
+|---|---|---|
+| เก็บ | สรุปของบทสนทนา | ไม่เก็บอะไรเลย — เซสชันใหม่ |
+| ต้นทุนในการรัน | เป็น request จริง (อ่านบทสนทนาทั้งหมดเพื่อสรุป) | ฟรี |
+| ใช้เมื่อ | ทำงานเดิมต่อ แต่ context เริ่มเต็ม | เปลี่ยนไปทำงานที่ไม่เกี่ยวข้องกัน |
+
+**ใช้ `/clear` ระหว่างงานที่ไม่เกี่ยวข้องกัน** context ค้างจากงานที่เสร็จแล้วไม่ได้ช่วยงานถัดไปเลย
+— มันแค่กินต้นทุน token ทุกข้อความถัดไปและเบี่ยงเบนสิ่งที่ Claude ให้ความสนใจ รัน `/rename` ก่อน
+ถ้าอยากหา session เก่ากลับมาทีหลัง; `/resume` จะดึงมันกลับมา
+
+**ใช้ `/compact` ระหว่างงาน** เมื่อคุณยังต้องการประวัติ แต่ window กำลังจะเต็ม เนื่องจากการ compact
+context ขนาดใหญ่เป็น request ที่มีต้นทุนสูงในตัวเอง (ต้องอ่านทุกอย่างที่กำลังจะสรุปก่อน) การ
+compact *ก่อน* ที่จำเป็นจริงๆ แค่เพื่อ "กันไว้ก่อน" จึงไม่ใช่ของฟรี ปล่อยให้ auto-compact ทำหน้าที่
+ของมันไป เว้นแต่คุณต้องการกำหนดทิศทางว่าให้เก็บอะไรโดยเฉพาะ
+
+## จัดการ context เชิงรุก
+
+- **มอบหมายการอ่านชิ้นใหญ่ให้ subagent** subagent มี context window แยกต่างหากของตัวเอง มีแค่สรุป
+  สุดท้ายเท่านั้นที่ส่งกลับมาถึงคุณ การส่งไฟล์ log ขนาดใหญ่หรือการค้นหาโค้ดแบบกว้างผ่าน subagent
+  ช่วยให้เนื้อหาดิบไม่เข้ามาในเซสชันหลักของคุณเลย
+- **เขียน prompt ให้เจาะจง** "Add input validation to the login handler in `auth.go`" ใช้
+  context น้อยกว่า "improve this codebase" มาก เพราะแบบหลังจะทริกเกอร์การอ่านสำรวจแบบกว้างเพื่อหา
+  ว่าคุณหมายถึงอะไร
+- **ให้ CLAUDE.md กระชับ** มันถูกโหลดเต็มทุกเซสชัน ไม่ว่างานปัจจุบันจะต้องใช้หรือไม่ — ดู
+  [Memory - CLAUDE.md](/docs/claude-md) สำหรับแนวทางกำหนดขนาด
+- **เลือกใช้ CLI tools แทน MCP servers เมื่อมีทั้งสองแบบ** `gh`, `aws`, `gcloud` ไม่ได้เพิ่มอะไร
+  เข้าไปในรายการ tool มากไปกว่าชื่อของมัน ในขณะที่การเชื่อมต่อ MCP ที่ยังทำงานอยู่อาจเพิ่มเข้ามา
+  มากกว่าอย่างมีนัยสำคัญ แม้ว่า schema เต็มของ tool จะถูก defer ไว้จนกว่าจะถูกใช้จริงก็ตาม
+- **ใช้ hooks กรอง output ที่รกออกก่อน** hook แบบ `PostToolUse` ที่ grep ไฟล์ test log ยาวหมื่น
+  บรรทัดให้เหลือแค่ส่วนที่ fail จะประหยัด token ที่ Claude ต้องอ่านทั้งหมด — ดู
+  [Hooks](/docs/hooks)
+
+## ตัวอย่างจริง
+
+เซสชันที่เปิดค้างไว้ทั้งบ่ายเพื่อ debug integration test ที่ flaky ตอนนี้กำลังจะเปลี่ยนไปทำงานที่
+ไม่เกี่ยวข้องกัน — เขียน endpoint ใหม่:
+
+```bash
+# Wrong: context fills with debugging history that's now irrelevant
+# to writing a new handler, and every message pays for it anyway.
+
+/rename flaky-integration-test-debug
+/clear
+# fresh session — CLAUDE.md and auto memory reload, debugging history doesn't
+```
+
+เทียบกับการทำงาน*เดิม*ต่อหลังจากถกกันไปมานานจนใกล้ถึงขีดจำกัด:
+
+```bash
+/compact focus on what we changed in the retry logic and why the test still fails
+# conversation gets summarized with that focus; you keep working on the same problem
+```
+
+เครื่องมือสองแบบสำหรับอาการที่ดูเหมือนเดียวกัน ("context เต็ม" แต่นั่นหมายถึงคนละอย่างก่อนใช้
+`/clear` และก่อนใช้ `/compact`)
+
+<CardGrid>
+  <Card
+    title="Hooks →"
+    href="/docs/hooks"
+    description="รันคำสั่ง shell อัตโนมัติในจุดต่างๆ ของ lifecycle ของ Claude Code"
+  />
+</CardGrid>

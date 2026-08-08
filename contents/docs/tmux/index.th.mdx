@@ -1,0 +1,225 @@
+---
+title: tmux - Terminal Multiplexer
+description: Terminal session แบบหลายบานหน้าต่างที่คงอยู่ถาวรและรอดจากการหลุด SSH
+keywords: ["tmux", "terminal multiplexer", "ssh", "persistent session", "panes", "windows", "screen"]
+---
+
+## มันคืออะไร
+
+`tmux` (terminal multiplexer) รัน shell session ของคุณอยู่ภายใน background server process แทนที่
+จะอยู่ในหน้าต่าง terminal ของคุณ terminal ที่คุณกำลังมองอยู่เป็นแค่ client ที่เชื่อมต่อไปยัง server
+นั้น ปิด terminal, หลุดการเชื่อมต่อ SSH, ปิดฝาโน้ตบุ๊กให้หลับ — session ยังคงรันต่อไป และคุณ
+reattach กลับไปที่จุดเดิมที่คุณทิ้งไว้ได้
+
+คุณสมบัติเดียวนี้แก้ปัญหาที่วิศวกร backend/DevOps ทุกคนเจอตั้งแต่เนิ่น ๆ: งานที่รันนาน (migration,
+build, `tail -f` บน production log) จะตายทันทีที่การเชื่อมต่อที่เริ่มมันหลุด ถ้าไม่มี tmux `nohup`
+และ `&` คือทางแก้ชั่วคราว แต่ถ้ามี tmux คุณไม่ต้องคิดถึงมันเลย — คุณแค่ SSH กลับเข้าไปแล้ว
+`tmux attach`
+
+สิ่งที่สองที่ tmux ให้คุณคือ **panes และ windows** — การแบ่ง terminal หนึ่งอันเป็นหลายส่วน แต่ละ
+ส่วนรัน shell ของตัวเอง โดยไม่ต้องเปิดหน้าต่าง terminal emulator ใหม่หรือเชื่อมต่อ SSH ใหม่
+
+<Note title="tmux vs screen" type="default">
+  `screen` ทำหน้าที่คล้ายกันและมีมาก่อน tmux tmux ชนะเพราะ pane ที่ script ได้ รูปแบบ config ที่
+  สมเหตุสมผลกว่า และการดูแลอย่างต่อเนื่อง ถ้าคุณ SSH เข้าเครื่องเก่าที่มีแค่ `screen` ติดตั้งอยู่
+  โมเดลความคิดถ่ายทอดตรงมาได้เลย — `screen -S name` แทน `tmux new -s name`, `Ctrl-a` แทน
+  `Ctrl-b` เป็น prefix default
+</Note>
+
+## แนวคิดหลัก
+
+tmux มีลำดับชั้นสามระดับ จำให้แม่นและทุกคำสั่งจะอ่านได้ว่า "ทำ X กับสิ่งที่ระดับ Y"
+
+<Mermaid chart="graph TD
+  Server[tmux server<br/>one background process] --> S1[Session: deploy]
+  Server --> S2[Session: monitoring]
+  S1 --> W1[Window 0: shell]
+  S1 --> W2[Window 1: logs]
+  W2 --> P1[Pane: tail api.log]
+  W2 --> P2[Pane: tail worker.log]" />
+
+- **Server** — background process หนึ่งตัวต่อเครื่อง เริ่มอัตโนมัติโดยคำสั่ง `tmux` ตัวแรก คุณ
+  แทบไม่ต้องยุ่งกับมันโดยตรง
+- **Session** — พื้นที่ทำงานที่มีชื่อ โดยทั่วไปหนึ่งอันต่อโปรเจกต์หรืองาน (`deploy`, `monitoring`)
+  การ detach ทิ้งให้มันรันต่อ การ attach เชื่อมกลับเข้าไป นี่คือหน่วยที่รอดจากการหลุดการเชื่อมต่อ
+- **Window** — แท็บเต็มหน้าจอภายใน session เหมือนแท็บใน browser แต่ละ window มีชื่อของตัวเองและ
+  บรรจุ pane ได้หนึ่งหรือหลายอัน
+- **Pane** — ส่วนย่อยของ window แต่ละอันรัน shell อิสระของตัวเอง การแบ่ง pane คือวิธีที่คุณเฝ้าดู
+  หลายอย่างพร้อมกันโดยไม่ต้องเปิด window หรือการเชื่อมต่อเพิ่ม
+
+ทุก session, window, และ pane มี index หรือชื่อ และทุกคำสั่ง tmux เล็งเป้าไปที่หนึ่งในนั้นด้วย
+**target syntax**: `session:window.pane` (เช่น `deploy:1.0`) การใช้งานประจำวันส่วนใหญ่ไม่ต้อง
+พิมพ์แบบนี้เลย — คุณนำทางด้วย keybinding แทน — แต่นี่คือสิ่งที่ flag `-t` รับเมื่อคุณ script tmux
+
+## ใช้งานอย่างไร
+
+ทุกคำสั่ง tmux จะพิมพ์ที่ shell prompt (`tmux new -s name`) หรือส่งเป็น **keybinding ตามหลัง
+prefix key** prefix default คือ `Ctrl-b`: กดมัน ปล่อยมือ แล้วกด command key `Ctrl-b %` หมายถึง
+"กด Ctrl-b ปล่อยมือ แล้วกด `%`" — ไม่ใช่กดพร้อมกันทั้งสามปุ่ม
+
+### Sessions
+
+```bash
+tmux new -s deploy          # create and attach a new session named "deploy"
+tmux ls                     # list all sessions on this server
+tmux attach -t deploy       # attach to an existing session (tmux a -t deploy also works)
+tmux kill-session -t deploy # kill a session and everything in it
+```
+
+| Keybinding | การกระทำ |
+|---|---|
+| `prefix d` | Detach ออกจาก session ปัจจุบัน (มันยังรันต่อ) |
+| `prefix $` | เปลี่ยนชื่อ session ปัจจุบัน |
+| `prefix s` | ตัวเลือก session แบบโต้ตอบ |
+
+### Windows
+
+| Keybinding | การกระทำ |
+|---|---|
+| `prefix c` | สร้าง window ใหม่ |
+| `prefix ,` | เปลี่ยนชื่อ window ปัจจุบัน |
+| `prefix n` / `prefix p` | Window ถัดไป / ก่อนหน้า |
+| `prefix 0`–`9` | ไปยัง window ตามหมายเลข |
+| `prefix w` | ตัวเลือก window แบบโต้ตอบ |
+| `prefix &` | Kill window ปัจจุบัน (ถามยืนยันก่อน) |
+
+### Panes
+
+| Keybinding | การกระทำ |
+|---|---|
+| `prefix %` | แบ่ง pane แนวตั้ง — pane ใหม่อยู่ **ด้านขวา** |
+| `prefix "` | แบ่ง pane แนวนอน — pane ใหม่อยู่ **ด้านล่าง** |
+| `prefix` ปุ่มลูกศร | ย้าย focus ไปยัง pane ทิศทางนั้น |
+| `prefix o` | วน focus ไปยัง pane ถัดไป |
+| `prefix q` | แสดงหมายเลข pane สั้น ๆ (แล้วกดหมายเลขเพื่อกระโดดไป) |
+| `prefix z` | Zoom pane ปัจจุบันให้เต็มจอ (toggle) |
+| `prefix x` | Kill pane ปัจจุบัน (ถามยืนยันก่อน) |
+| `prefix Ctrl-arrow` | ปรับขนาด pane ปัจจุบัน |
+
+<Note title="ทิศทางการแบ่งของ % และ &quot; ไม่ใช่การพิมพ์ผิด" type="warning">
+  `%` แบ่ง pane ให้ **เรียงกันแนวนอน** (ข้างกัน คั่นด้วยเส้นแนวตั้ง) และ `"` แบ่ง pane ให้
+  **เรียงกันแนวตั้ง** (ซ้อนกัน คั่นด้วยเส้นแนวนอน) tmux ตั้งชื่อการแบ่งตามแกนที่เส้นแบ่งวิ่งไปตาม
+  ซึ่งตรงข้ามกับที่คนส่วนใหญ่เดาตอนอ่านครั้งแรก คุ้มค่าที่จะจำไว้ครั้งเดียวแทนที่จะมานั่งคิดใหม่ทุก
+  ครั้ง
+</Note>
+
+### Copy mode
+
+ล้อเลื่อนเมาส์ของคุณจะไม่เลื่อน buffer ของ tmux โดย default เข้า copy mode ด้วย `prefix [`
+นำทางด้วยปุ่มลูกศรหรือ vi binding (`j`/`k`) และกด `q` เพื่อออก ด้วย `set -g mouse on` ใน config
+ของคุณ (ด้านล่าง) ล้อเลื่อนเมาส์และการคลิกเพื่อเลือก pane จะทำงานตามที่คาดหวัง ซึ่งเป็นสิ่งแรกที่
+คนส่วนใหญ่เปิดใช้
+
+## `~/.tmux.conf` เริ่มต้น
+
+tmux อ่าน `~/.tmux.conf` ตอน startup (หรือ `prefix :` แล้วตามด้วย `source-file ~/.tmux.conf` เพื่อ
+reload โดยไม่ต้อง restart) นี่คือจุดเริ่มต้นที่สมเหตุสมผล — comment ทิ้งอะไรก็ตามที่คุณไม่ต้องการ:
+
+```bash showLineNumbers title="~/.tmux.conf"
+# Remap prefix from Ctrl-b to Ctrl-a — closer to the home row, and matches screen.
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix
+
+# Mouse support: click to select panes, scroll to scroll, drag to resize.
+set -g mouse on
+
+# Start window and pane numbering at 1, not 0 — matches the keyboard row.
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Renumber windows automatically when one is closed.
+set -g renumber-windows on
+
+# Scrollback buffer size (default is only 2000 lines).
+set -g history-limit 50000
+
+# Faster key repetition — default escape delay hurts vim/nvim inside tmux.
+set -sg escape-time 0
+
+# More intuitive split keybindings, opened in the current pane's directory.
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind c new-window -c "#{pane_current_path}"
+
+# Reload config without restarting the server.
+bind r source-file ~/.tmux.conf \; display "Config reloaded"
+
+# Status bar: session name left, host + time right.
+set -g status-style bg=black,fg=white
+set -g status-left "#[bold]#S "
+set -g status-right "%H:%M  #h"
+
+# Correct terminal type for full color support in vim/nvim and other TUIs.
+set -g default-terminal "tmux-256color"
+```
+
+<Note title="ทำไม -c '#{pane_current_path}' ถึงสำคัญ" type="success">
+  ถ้าไม่มีมัน pane และ window ใหม่ทุกอันจะเปิดใน directory ที่ tmux เริ่มต้นไว้เอง — ไม่ใช่
+  directory ที่คุณ `cd` เข้าไปตั้งแต่นั้น นี่คือความรำคาญที่พบบ่อยที่สุดของ tmux และวิธีแก้คือสาม
+  บรรทัดนี้
+</Note>
+
+## แนวทางที่ดี
+
+- **ตั้งชื่อ session ตามงานที่มันทำ** ไม่ใช่ตามวันที่หรือตัวเลข — `deploy`, `db-migrate`,
+  `incident-2024-08` ล้วนเป็นสิ่งที่คุณจำได้อีกหนึ่งสัปดาห์ให้หลัง ส่วน `1` กับ `2` ไม่ใช่
+- **หนึ่ง session ต่อหนึ่งงานหรือโปรเจกต์** ไม่ใช่ session ยักษ์เดียวที่มีสี่สิบ window `tmux ls`
+  ควรอ่านออกได้เหมือนสารบัญ
+- **เริ่มงานที่ยาวหรือเสี่ยงภายใน tmux เป็น default** บนเครื่อง remote ทุกเครื่อง — migration,
+  deploy, การ backfill ข้อมูล การหลุดการเชื่อมต่อ SSH ห้านาทีเข้างานสองชั่วโมงคือวิธีเรียนรู้บทเรียน
+  นี้แบบแย่ ๆ
+- **Detach อย่าปิด terminal** `prefix d` ทิ้ง session ให้รันต่อ การปิดหน้าต่าง terminal (หรือหลุด
+  การเชื่อมต่อ) ก็ทิ้งให้รันต่อเหมือนกัน แต่ detach คือแบบที่ตั้งใจ และไม่เสี่ยงที่จะฆ่า foreground
+  process ด้วย `Ctrl-C` ระหว่างทางออก
+- **Kill session ที่ทำเสร็จแล้ว** `tmux ls` สะสม session ที่ถูกลืมได้เร็ว แต่ละอันคือ shell ที่ยัง
+  มีชีวิตอยู่ (และอาจมี process ที่ยังรันอยู่) ที่ไม่มีใครเฝ้าดู
+- **เปิด mouse mode ไว้แต่เนิ่น ๆ** ถ้าคุณเพิ่งเริ่มใช้ tmux — มันตัดความฝืดที่ใหญ่ที่สุดออกไป
+  (การเลื่อน, การเลือก pane) ระหว่างที่คุณสร้าง muscle memory สำหรับ keybinding และไม่ได้กันคุณ
+  ไม่ให้ใช้ shortcut คีย์บอร์ดควบคู่กันไปด้วย
+
+## ตัวอย่างจริง
+
+SSH เข้า server เพื่อรัน migration และเฝ้าดู log ไปพร้อมกัน ในแบบที่รอดจากการที่โน้ตบุ๊กของคุณ
+เข้าสู่โหมด sleep:
+
+```bash
+ssh deploy@db-primary
+tmux new -s migrate          # start a named session
+```
+
+แบ่ง window เพื่อให้ migration และการ tail log รันเคียงข้างกัน:
+
+```
+prefix %                      # split vertically → two panes, side by side
+```
+
+ใน pane ซ้าย:
+
+```bash
+make migrate-up
+```
+
+ใน pane ขวา (`prefix →` หรือ `prefix o` เพื่อสลับ focus):
+
+```bash
+tail -f /var/log/app/migration.log
+```
+
+ตอนนี้ detach ด้วย `prefix d` แล้วปิดฝาโน้ตบุ๊ก ทีหลัง จากที่ไหนก็ได้:
+
+```bash
+ssh deploy@db-primary
+tmux attach -t migrate        # back exactly where you left it, migration still running
+```
+
+ถ้า migration เสร็จไปแล้วระหว่างที่คุณไม่อยู่ log tail จะแสดงประวัติทั้งหมดเพราะมันยังอยู่ใน
+scrollback ของ pane — ไม่มีอะไรหายไปเพราะคุณไม่ได้ดูมันแบบ live
+
+<CardGrid>
+  <Card
+    title="Agent Teams with tmux →"
+    href="/docs/agent-teams-tmux"
+    description="ใช้ pane ของ tmux เพื่อรันและเฝ้าดู Claude Code agent session หลายตัวเคียงข้างกัน"
+  />
+</CardGrid>

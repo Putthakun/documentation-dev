@@ -1,0 +1,64 @@
+---
+title: พื้นฐาน Golang
+description: ส่วนประกอบหลักของภาษา Go — types, functions, structs, interfaces และ modules
+keywords: ["golang", "go", "fundamentals", "basics"]
+---
+
+Go เป็นภาษาแบบ statically typed ที่คอมไพล์ล่วงหน้า ออกแบบมาเพื่อสร้าง backend software ที่เรียบง่าย เชื่อถือได้ และมีประสิทธิภาพ ตัวภาษามี feature set ที่เล็กโดยตั้งใจ — คุณสามารถเรียนรู้ทั้งภาษาได้ภายในไม่กี่วัน ซึ่งนั่นคือจุดประสงค์หลัก: มีสิ่งที่ต้องจำน้อยลง มีวิธีเขียนสิ่งเดียวกันน้อยลง และโค้ดยังคงอ่านง่ายเมื่อคนอื่น (รวมถึงตัวคุณเองในอนาคต) เปิดมันขึ้นมาดู
+
+ส่วนนี้ครอบคลุมตัวภาษาเอง ส่วน pattern ที่ idiomatic สำหรับจัดโครงสร้างโปรเจกต์จริงจะอยู่ในหัวข้อถัดไปที่ [Golang Best Practices](/docs/code-organization)
+
+## สิ่งที่คุณจะพบในส่วนนี้
+
+<CardGrid>
+  <Card
+    title="Introduction & Setup"
+    href="/docs/golang-fundamentals/introduction"
+    description="ทำไมต้อง Go, วิธีติดตั้ง, และ toolchain ที่คุณจะใช้ทุกวัน"
+  />
+  <Card
+    title="Variables, Types & Constants"
+    href="/docs/golang-fundamentals/variables-types"
+    description="การประกาศตัวแปร, zero values, การแปลงชนิดข้อมูล และ iota"
+  />
+  <Card
+    title="Control Flow"
+    href="/docs/golang-fundamentals/control-flow"
+    description="if, for, switch และ defer"
+  />
+  <Card
+    title="Functions"
+    href="/docs/golang-fundamentals/functions"
+    description="Multiple returns, variadics และ closures"
+  />
+  <Card
+    title="Arrays, Slices & Maps"
+    href="/docs/golang-fundamentals/collections"
+    description="collections ของ Go — และกับดักเรื่อง slice ที่ทุกคนต้องเจอ"
+  />
+  <Card
+    title="Pointers"
+    href="/docs/golang-fundamentals/pointers"
+    description="pointer คืออะไร และเมื่อไหร่ที่คุณควรใช้จริง ๆ"
+  />
+  <Card
+    title="Structs & Methods"
+    href="/docs/golang-fundamentals/structs-methods"
+    description="custom types, methods และ value vs pointer receivers"
+  />
+  <Card
+    title="Interfaces"
+    href="/docs/golang-fundamentals/interfaces"
+    description="การ satisfy แบบ implicit, type switches และกับดัก typed-nil"
+  />
+  <Card
+    title="Packages & Modules"
+    href="/docs/golang-fundamentals/packages-modules"
+    description="go.mod, imports และความหมายของการใช้ตัวพิมพ์ใหญ่"
+  />
+  <Card
+    title="Errors: The Basics"
+    href="/docs/golang-fundamentals/errors-basics"
+    description="ทำไม Go ถึง return error แทนที่จะ throw มัน"
+  />
+</CardGrid>

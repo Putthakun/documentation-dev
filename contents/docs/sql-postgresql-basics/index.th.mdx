@@ -1,0 +1,66 @@
+---
+title: พื้นฐาน SQL / PostgreSQL
+description: แนวคิดหลักของ SQL และ PostgreSQL ที่วิศวกร backend ทุกคนต้องรู้ — ตาราง, คำสั่ง query, join, transaction และ index
+keywords: ["sql", "postgresql", "postgres", "database", "basics"]
+---
+
+SQL คือภาษาที่ใช้พูดคุยกับ relational database และ PostgreSQL คือฐานข้อมูลที่ทีม backend ส่วนใหญ่เลือกใช้: เป็น open source, เสถียรมาก และมีฟีเจอร์เพียบพร้อมที่ช่วยให้เราผลักงานลงไปทำในฐานข้อมูลแทนที่จะทำใน application code
+
+ส่วนนี้ครอบคลุม SQL ที่คุณจะเขียนเป็นประจำทุกวัน และรายละเอียดเฉพาะของ PostgreSQL ที่ควรรู้ตั้งแต่เนิ่นๆ ส่วนหัวข้อที่ลึกขึ้น — query plan, JSONB, window function, การเปลี่ยนแปลง schema — อยู่ใน [PostgreSQL Advanced](/docs/postgresql-advanced), [Query Optimization](/docs/query-optimization) และ [Migration Strategies](/docs/migration-strategies)
+
+ทุกตัวอย่างใช้ schema เล็กๆ ชุดเดียวกัน — users, orders และ products — เพื่อให้ query ในแต่ละหน้าต่อยอดกันไปเรื่อยๆ ขณะที่คุณอ่าน
+
+## สิ่งที่คุณจะพบในส่วนนี้
+
+<CardGrid>
+  <Card
+    title="Introduction & Setup"
+    href="/docs/sql-postgresql-basics/introduction"
+    description="Relational database, PostgreSQL และการรันเซิร์ฟเวอร์ให้ใช้งานได้"
+  />
+  <Card
+    title="Tables & Data Types"
+    href="/docs/sql-postgresql-basics/tables-data-types"
+    description="CREATE TABLE และการเลือก column type ให้เหมาะสม"
+  />
+  <Card
+    title="Constraints & Keys"
+    href="/docs/sql-postgresql-basics/constraints-keys"
+    description="Primary key, foreign key และการให้ฐานข้อมูลช่วยรับประกันความถูกต้อง"
+  />
+  <Card
+    title="Querying Data"
+    href="/docs/sql-postgresql-basics/querying"
+    description="SELECT, WHERE, ORDER BY, LIMIT — และพฤติกรรมของ NULL"
+  />
+  <Card
+    title="Joins"
+    href="/docs/sql-postgresql-basics/joins"
+    description="การรวมแถวข้ามตาราง — INNER, LEFT และเพื่อนๆ"
+  />
+  <Card
+    title="Aggregation & Grouping"
+    href="/docs/sql-postgresql-basics/aggregation"
+    description="COUNT, SUM, GROUP BY และ HAVING"
+  />
+  <Card
+    title="Modifying Data"
+    href="/docs/sql-postgresql-basics/modifying-data"
+    description="INSERT, UPDATE, DELETE, upsert และ RETURNING"
+  />
+  <Card
+    title="Transactions"
+    href="/docs/sql-postgresql-basics/transactions"
+    description="ACID, BEGIN/COMMIT/ROLLBACK และเหตุผลที่มันสำคัญ"
+  />
+  <Card
+    title="Indexes: The Basics"
+    href="/docs/sql-postgresql-basics/indexes"
+    description="index คืออะไร ควรเพิ่มเมื่อไหร่ และต้องแลกด้วยอะไร"
+  />
+  <Card
+    title="Using PostgreSQL from Go"
+    href="/docs/sql-postgresql-basics/using-from-go"
+    description="pgx, รูปแบบการ query และการป้องกัน SQL injection"
+  />
+</CardGrid>

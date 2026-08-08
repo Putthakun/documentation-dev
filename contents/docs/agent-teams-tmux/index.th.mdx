@@ -1,0 +1,182 @@
+---
+title: Agent Team กับ tmux
+description: Layout ของ tmux ที่ใช้งานได้จริงสำหรับรัน Claude Code หลาย agent เคียงข้างกัน แต่ละตัวอยู่บน git worktree ของตัวเอง
+keywords: ["claude code", "agent teams", "tmux", "git worktrees", "multi-agent", "split panes"]
+---
+
+## คืออะไร
+
+[Agent Teams](/docs/agent-teams) พูดถึง *ทำไม* และ *เมื่อไหร่* ควรรัน Claude Code หลายเซสชันบน
+งานเดียวกัน ไม่ว่าจะเป็นฟีเจอร์ team ในตัวแบบ experimental หรือการเปิดหลายเซสชัน `claude` ด้วยมือ
+เอง [tmux](/docs/tmux) พูดถึงตัว terminal multiplexer เอง — sessions, windows, panes, การคงอยู่
+
+หน้านี้คือจุดเชื่อม: **การใช้ tmux panes เพื่อดูและควบคุม Claude Code agent หลายตัวพร้อมกัน ใน
+หน้าจอเดียว โดยไม่ให้พวกมันเหยียบไฟล์ของกันและกัน** นี่เป็นจุดเชื่อมต่อที่มีการบันทึกไว้จริง ไม่ใช่
+แค่ความบังเอิญของเครื่องมือมีประโยชน์สองตัว — ฟีเจอร์ agent teams ในตัวของ Claude Code มี
+**split-pane display mode ที่ต้องใช้ tmux** (หรือ iTerm2) เพื่อแสดง teammate หนึ่งตัวต่อหนึ่ง pane
+layout เดียวกันนี้ก็เป็นสิ่งที่คุณจะสร้างขึ้นเองด้วยมือสำหรับรูปแบบหลายเซสชันแบบ manual ทั้งสองทาง
+มาลงเอยที่ภาพเดียวกัน
+
+<Note title="tmux เป็นแค่หนึ่งตัวเลือก ไม่ใช่ข้อบังคับ" type="default">
+  Display mode แบบ in-process ของ agent teams — ค่าเริ่มต้น — ทำงานได้ใน terminal ใดก็ได้โดยไม่ต้อง
+  ใช้ tmux เลย คุณสลับระหว่าง teammates ผ่าน agent panel แทนที่จะมองไป pane อื่น tmux (หรือ iTerm2)
+  คือสิ่งที่คุณเลือกใช้เฉพาะเมื่อต้องการเห็น output ของ agent ทุกตัวพร้อมกัน ในสายตาเดียว โดยไม่ต้อง
+  สลับโฟกัส
+</Note>
+
+## ปัญหาหลัก: agent กับไฟล์
+
+รัน Claude Code สอง agent บน working directory เดียวกัน แล้วพวกมันอาจแก้ไฟล์เดียวกันพร้อมกันได้
+ไม่มี agent ตัวไหนรู้ว่าอีกตัวมีอยู่ เว้นแต่คุณจะตั้ง shared task list ของ team ในตัวไว้ — และ
+ถึงอย่างนั้น "อย่าแตะไฟล์เดียวกัน" ก็เป็นแค่ convention ที่ team ต้องยึดถือเอง ไม่ใช่ lock ที่
+filesystem บังคับใช้
+
+วิธีแก้คือแบบเดียวกับที่ [Agent Teams](/docs/agent-teams) เคยกล่าวไว้แล้ว: **หนึ่ง git worktree
+ต่อหนึ่ง agent** worktree คือ checkout แยกต่างหากของ repository เดียวกัน อยู่บน branch ของตัวเอง
+อยู่ในไดเรกทอรีของตัวเอง — ดังนั้นสอง agent ที่ "ทำงานในโปรเจกต์เดียวกัน" จริงๆ แล้วบนดิสก์คือการ
+ทำงานในสอง directory tree ที่แยกกันสนิท เพียงแต่แชร์ประวัติ git ร่วมกัน
+
+```bash
+git worktree add ../myapp-auth feature-auth
+git worktree add ../myapp-ratelimit fix-rate-limit
+git worktree list
+```
+
+flag `--worktree` ของ Claude Code เองจะทำขั้นตอน `git worktree add` ให้คุณ แล้วพาคุณเข้าเซสชัน
+ภายในนั้นทันที:
+
+```bash
+claude --worktree feature-auth
+```
+
+## Layout ของ tmux ที่แนะนำ
+
+หนึ่ง tmux window หนึ่ง pane ต่อหนึ่ง agent โดย shell ของแต่ละ pane `cd` เข้าไปยัง worktree ของ
+agent นั้นก่อนที่ Claude Code จะเริ่มทำงาน:
+
+<Mermaid chart="graph TD
+  Session[tmux session: agents] --> Window[Window: myapp]
+  Window --> P1[Pane 0<br/>~/myapp-auth<br/>claude --worktree feature-auth]
+  Window --> P2[Pane 1<br/>~/myapp-ratelimit<br/>claude --worktree fix-rate-limit]
+  Window --> P3[Pane 2<br/>~/myapp-tests<br/>claude --worktree add-tests]
+  P1 -.reads/writes.-> WT1[(worktree: feature-auth branch)]
+  P2 -.reads/writes.-> WT2[(worktree: fix-rate-limit branch)]
+  P3 -.reads/writes.-> WT3[(worktree: add-tests branch)]" />
+
+การสร้างด้วยมือ:
+
+```bash
+tmux new -s agents -n myapp          # session "agents", window "myapp"
+
+# Pane 0 (created with the window) — first agent
+cd ~/myapp-auth && claude --worktree feature-auth
+
+# prefix %  → split right, second agent
+cd ~/myapp-ratelimit && claude --worktree fix-rate-limit
+
+# prefix "  → split the new pane down, third agent
+cd ~/myapp-tests && claude --worktree add-tests
+```
+
+`prefix q` จะแสดงหมายเลข pane สั้นๆ ให้คุณกระโดดไปยัง pane ใดได้ทันที; `prefix o` วนโฟกัสไปเรื่อยๆ;
+`prefix z` ซูม pane ที่คุณกำลังอ่านให้เต็มจอแล้วกลับมาได้เมื่อต้องการโฟกัส output ของ agent ตัว
+เดียวโดยไม่เสีย agent ตัวอื่นไป reference คีย์บายด์ฉบับเต็มอยู่ที่หน้า [tmux](/docs/tmux)
+
+<Note title="ถ้าคุณกำลังใช้ฟีเจอร์ agent teams ในตัวแทน" type="success">
+  คุณไม่ต้องสร้าง layout นี้ด้วยมือเลย ตั้ง `teammateMode` เป็น `"tmux"` (หรือ `"auto"` ขณะที่
+  อยู่ใน tmux session อยู่แล้ว) แล้ว lead จะสร้าง panes เองเมื่อ spawn teammates — ดู
+  [Choose a display mode](/docs/agent-teams#the-built-in-feature) ค่า config ของ team ยังคง
+  track tmux pane ID ของ teammate แต่ละตัวด้วย ส่วนนี้ของ layout แบบ manual มีไว้สำหรับรูปแบบ DIY:
+  การรันเซสชัน `claude` แยกอิสระด้วยตัวเองโดยไม่มีการประสานงานของ team อยู่เบื้องหลัง
+</Note>
+
+## ข้อตกลงในการตั้งชื่อ
+
+ชื่อคือสิ่งเดียวที่กันคุณไว้จากหน้าจอที่เต็มไปด้วย pane หน้าตาเหมือนกันตอนตีสอง มีสอง convention
+ที่ควรยึดถือ:
+
+- **ชื่อ session และ window ตรงกับ repo และงาน** ไม่ใช่วันที่หรือหมายเลข:
+  `tmux new -s agents -n myapp` อ่านง่ายเมื่อดูใน `tmux ls`; `tmux new -s s1` ไม่ใช่
+- **ชื่อไดเรกทอรี worktree ตรงกับชื่อ branch** และ pane title (หรือแค่ shell prompt) ควรบอกชัดว่า
+  คุณอยู่ใน worktree ไหน `~/myapp-auth` บน branch `feature-auth` ไม่ใช่ `~/myapp2` ถ้าคุณ rename
+  windows ระหว่างทาง (`prefix ,`) ให้ตั้งชื่อแต่ละอันตาม branch ที่ agent ใน window นั้นกำลังทำงาน
+  อยู่ — `feature-auth`, `fix-rate-limit` — เพื่อให้ window picker ของ `prefix w` กลายเป็น
+  status board ในตัว
+
+## หลีกเลี่ยงไม่ให้ agent เหยียบกัน
+
+- **หนึ่ง worktree ต่อหนึ่ง agent เสมอ** นี่คือกฎหลักที่แบกรับทุกอย่าง ข้อตกลงตั้งชื่อเป็นแค่การ
+  จัดระเบียบต่อยอดขึ้นมาเท่านั้น สอง agent ในไดเรกทอรีเดียวคือ setup เดียวที่มักผลิตการแก้ไขที่
+  ขัดแย้งกันอย่างสม่ำเสมอ
+- **ระวัง shared resource ที่อยู่นอก file tree** worktrees แยกไฟล์ ไม่ได้แยกฐานข้อมูล, port, หรือ
+  external services สอง agent ที่พยายาม bind `:8080` เดียวกัน หรือทั้งคู่ migrate database
+  dev เดียวกัน จะชนกันแม้จะแยก worktree สมบูรณ์แบบก็ตาม — ให้ port หรือชื่อ database ที่แตกต่างกัน
+  ผ่าน env vars ต่อ pane ถ้า agent จะรันแอปด้วย
+- **Merge อย่างตั้งใจ ไม่ใช่อัตโนมัติ** worktrees บน branch แยกกันจะไม่ merge กันเอง ตัดสินใจลำดับ
+  การ merge ล่วงหน้า โดยเฉพาะถ้าสอง branch แตะโค้ดที่ทับซ้อนกัน แม้จะมาจาก worktree ต่างกัน — การ
+  แยก worktree ป้องกันแค่ความขัดแย้งขณะแก้ไขสด ไม่ได้ป้องกัน merge conflict ในท้ายที่สุด
+- **เก็บกวาด worktrees ที่ใช้เสร็จแล้ว** เหมือนกับที่คุณเก็บกวาด session ที่ค้างอยู่:
+  ```bash
+  git worktree remove ../myapp-auth
+  git worktree prune
+  ```
+
+## เคล็ดลับที่ใช้ได้จริง
+
+- **เปิด tmux mouse mode** (`set -g mouse on` ดู [tmux starter
+  config](/docs/tmux#a-starter-tmuxconf)) เพื่อให้การคลิกเข้า pane เพื่ออ่านหรือสั่งงาน agent ไม่
+  ต้องท่องจำคีย์นำทางก่อน
+- **Detach อย่าปิด** `prefix d` จะปล่อยให้ agent ทุกตัวรันต่อ ในขณะที่การปิดหน้าต่าง terminal
+  อาจปิดด้วยเช่นกัน ขึ้นอยู่กับ terminal ของคุณ แต่การ detach คือแบบที่คุณควบคุมได้อย่างตั้งใจ
+  attach กลับมาทีหลังด้วย `tmux attach -t agents` แล้วทุก pane — และทุก agent — จะอยู่ตรงจุดที่
+  คุณทิ้งไว้พอดี
+- **เช็ค `tmux ls` หา orphans** ถ้า Claude Code session ที่เปิด split panes เองไม่ได้ถูกปิดอย่าง
+  สะอาด tmux session ที่อยู่เบื้องหลังอาจอยู่รอดต่อไปได้ ให้ list sessions แล้ว kill อันที่ค้าง:
+  ```bash
+  tmux ls
+  tmux kill-session -t <name>
+  ```
+- **อย่ารัน agent มากกว่าที่คุณอ่านไหว** layout สี่ pane ที่คุณเหลือบดูสม่ำเสมอ ดีกว่า layout แปด
+  pane ที่ครึ่งหนึ่งของ agent ถูกทิ้งไว้โดยไม่มีคนดูแลนานยี่สิบนาที [Agent
+  Teams](/docs/agent-teams#best-practices) พูดประเด็นเดียวกันนี้เรื่องขนาด team ด้วยเหตุผลพื้นฐาน
+  เดียวกัน — ความสนใจไม่ได้ขนานกันได้ดีเท่า agent
+- **ซูมเข้าก่อนตัดสินใจ** `prefix z` บน pane เดียวก่อนอนุมัติ plan หรืออ่าน diff ยาวๆ — pane
+  ขนาดหนึ่งในสี่จอเหมาะกับการเหลือบดูความคืบหน้า ไม่เหมาะกับการรีวิวโค้ด
+
+## ตัวอย่างจริง
+
+สามการแก้ไขที่เป็นอิสระต่อกันลงเอยใน PR review รอบเดียว รันแบบขนาน:
+
+```bash
+git worktree add ../billing-refund fix/refund-rounding
+git worktree add ../billing-webhook fix/webhook-retry
+git worktree add ../billing-tests test/coverage-gaps
+
+tmux new -s billing -n fixes
+cd ~/billing-refund  && claude --worktree fix/refund-rounding
+```
+
+`prefix %` แล้วใน pane ใหม่ทางขวา:
+
+```bash
+cd ~/billing-webhook && claude --worktree fix/webhook-retry
+```
+
+`prefix "` บน pane นั้นเพื่อ split ลงด้านล่าง แล้ว:
+
+```bash
+cd ~/billing-tests   && claude --worktree test/coverage-gaps
+```
+
+สาม agent, สาม branch, สาม pane, ไม่มีไฟล์ที่ใช้ร่วมกันเลย `prefix o` วนดูความคืบหน้า; `prefix z`
+ซูมตัวที่ต้องการดูให้ชัด; `prefix d` detach ไปกินข้าวเที่ยง แล้ว `tmux attach -t billing` ดึง
+layout ทั้งหมดกลับมาได้ทีหลัง — agent ทั้งสามตัวยังรันอยู่ ไม่มีอะไรหาย เมื่อแต่ละ branch พร้อมแล้ว
+ให้รีวิวและ merge ตามลำดับที่สมเหตุสมผล เหมือนกับการรีวิว PR ของวิศวกรสามคนแยกกัน
+
+<CardGrid>
+  <Card
+    title="Building APIs →"
+    href="/docs/building-apis"
+    description="กลับสู่แก่นของงาน backend engineering: การออกแบบและสร้าง production API"
+  />
+</CardGrid>

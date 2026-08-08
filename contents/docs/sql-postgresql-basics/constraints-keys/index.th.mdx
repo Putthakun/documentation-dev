@@ -1,0 +1,170 @@
+---
+title: Constraint และ Key
+description: Primary key, foreign key และ constraint ต่างๆ — ให้ฐานข้อมูลช่วยรับประกันความถูกต้องแทน application ของคุณ
+keywords: ["primary key", "foreign key", "not null", "unique", "check constraint", "referential integrity", "on delete cascade"]
+---
+
+## ทำไม constraint ถึงสำคัญ
+
+Constraint คือกฎที่ฐานข้อมูลบังคับใช้กับทุกการเขียนข้อมูล ไม่ว่าจะมาจากที่ไหนก็ตาม นี่คือประเด็นสำคัญ: Go service ของคุณอาจตรวจสอบ input อย่างรอบคอบ แต่ migration script, แอดมินที่รัน SQL ด้วยมือ, background job หรือ service ตัวที่สอง ล้วนเขียนลงตารางเดียวกันได้ทั้งนั้น constraint คือด่านเดียวที่ไม่มีใครข้ามได้
+
+<Note title="การ validate ใน application กับ constraint ทำหน้าที่ต่างกัน" type="success">
+  Validate ใน application เพื่อให้ผู้ใช้เห็น error message ที่ดี ส่วน constraint ในฐานข้อมูลเพื่อรับประกันว่าข้อมูล
+  *ถูกต้องจริงๆ* ควรมีทั้งสองอย่าง — ไม่ได้ซ้ำซ้อนกัน ข้อมูลผิดๆ ที่หลุดเข้าไปในฐานข้อมูลที่ไม่มี constraint
+  นั้นแก้ไขได้ยากและมีค่าใช้จ่ายสูง
+</Note>
+
+## NOT NULL
+
+```sql showLineNumbers
+name TEXT NOT NULL,
+```
+
+ปฏิเสธแถวที่คอลัมน์นั้นไม่มีค่า ให้ตั้ง `NOT NULL` เป็นค่าเริ่มต้น และอนุญาตให้เป็น null เฉพาะกรณีที่ "ไม่ทราบค่า" หรือ "ไม่เกี่ยวข้อง" เป็นสถานะที่มีความหมายจริงๆ เท่านั้น — เพราะทุกคอลัมน์ที่ nullable จะเพิ่มความซับซ้อนให้ทุก query ที่อ่านมัน (ดู [การจัดการ NULL](/docs/sql-postgresql-basics/querying#working-with-null))
+
+## UNIQUE
+
+```sql showLineNumbers
+email TEXT NOT NULL UNIQUE,
+
+-- Multi-column: the combination must be unique, not each column separately
+CONSTRAINT one_review_per_user UNIQUE (user_id, product_id)
+```
+
+<Note title="ความไม่ซ้ำกันทำใน application code ให้เชื่อถือได้จริงไม่ได้" type="warning">
+  บั๊กคลาสสิก: `SELECT` เพื่อเช็คว่ามี email นี้อยู่แล้วหรือยัง แล้วค่อย `INSERT` ถ้ายังไม่มี สอง request
+  ที่มาพร้อมกันต่างก็เห็นว่า "ยังไม่มี" แล้วก็ insert ทั้งคู่ วิธีแก้ที่เชื่อถือได้จริงมีทางเดียวคือ
+  constraint `UNIQUE` — ฐานข้อมูลจะปฏิเสธตัวที่สอง จัดการ error ที่เกิดขึ้น (Postgres error code `23505`)
+  แทนที่จะพยายามป้องกันด้วยการเช็คล่วงหน้า
+</Note>
+
+## CHECK
+
+บังคับใช้เงื่อนไข boolean ใดๆ กับแถวข้อมูล:
+
+```sql showLineNumbers
+price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+quantity    INTEGER NOT NULL CHECK (quantity > 0),
+status      TEXT NOT NULL CHECK (status IN ('pending', 'paid', 'shipped', 'cancelled')),
+
+-- Named, and referencing multiple columns
+CONSTRAINT valid_date_range CHECK (ends_at > starts_at)
+```
+
+เพิ่มได้ง่ายและช่วยดักบั๊กได้ทั้งหมวดหมู่ — ราคาติดลบจะไม่มีทางเกิดขึ้นในตารางได้เลย
+
+## Primary key
+
+คอลัมน์ที่ระบุตัวตนของแถวได้อย่างไม่ซ้ำกัน มีนัยของ `NOT NULL` + `UNIQUE` โดยอัตโนมัติ และ PostgreSQL จะสร้าง index ให้เองโดยอัตโนมัติ:
+
+```sql showLineNumbers
+id BIGSERIAL PRIMARY KEY,
+
+-- Composite: for join tables, where the pair is the identity
+CREATE TABLE order_tags (
+    order_id BIGINT NOT NULL REFERENCES orders(id),
+    tag_id   BIGINT NOT NULL REFERENCES tags(id),
+    PRIMARY KEY (order_id, tag_id)
+);
+```
+
+ทุกตารางควรมี primary key หากไม่มี คุณจะไม่มีวิธีที่เชื่อถือได้ในการอ้างอิงหรืออัปเดตแถวใดแถวหนึ่งโดยเฉพาะ
+
+## Foreign key
+
+foreign key บอกว่า "คอลัมน์นี้ต้องมีค่าที่มีอยู่จริงในอีกตารางหนึ่ง" นี่คือ **referential integrity** — การรับประกันว่า order จะไม่มีวันชี้ไปหา user ที่ไม่มีอยู่จริง
+
+```sql showLineNumbers
+CREATE TABLE orders (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES users(id),
+    product_id BIGINT NOT NULL REFERENCES products(id),
+    quantity   INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0)
+);
+```
+
+<Mermaid chart="graph LR
+  O[orders.user_id] -->|must exist in| U[users.id]
+  O2[orders.product_id] -->|must exist in| P[products.id]" />
+
+ตอนนี้ทั้งสองคำสั่งนี้จะล้มเหลว ซึ่งเป็นสิ่งที่คุณต้องการพอดี:
+
+```sql showLineNumbers
+-- Fails: user 999 doesn't exist
+INSERT INTO orders (user_id, product_id) VALUES (999, 1);
+
+-- Fails: user 1 still has orders referencing them
+DELETE FROM users WHERE id = 1;
+```
+
+### พฤติกรรม ON DELETE
+
+คุณควบคุมได้ว่าจะเกิดอะไรขึ้นเมื่อแถวที่ถูกอ้างอิงถูกลบ:
+
+```sql showLineNumbers
+-- Default: block the delete while children exist. Safest.
+user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+
+-- Delete the children too. Powerful and dangerous.
+user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+-- Keep the child row, null out the reference (column must be nullable)
+user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+```
+
+| ตัวเลือก | เมื่อลบ user... |
+|---|---|
+| `RESTRICT` (ค่าเริ่มต้น) | ล้มเหลวถ้ายังมี order อยู่ |
+| `CASCADE` | ลบ order ทั้งหมดของ user นั้นไปด้วย |
+| `SET NULL` | เก็บ order ไว้ แต่ตั้ง `user_id` เป็น `NULL` |
+
+<Note title="ระวังการใช้ CASCADE" type="danger">
+  `ON DELETE CASCADE` อาจลบข้อมูลมากกว่าที่คุณคาดไว้โดยเงียบๆ ไล่ลบต่อกันเป็นทอดๆ ผ่านหลายตาราง
+  มันเหมาะกับข้อมูลที่เป็น "เจ้าของ" กันจริงๆ (ลบ order ก็ควรลบ line item ของมันไปด้วย) แต่ไม่เหมาะกับ
+  อะไรที่คุณอยากเก็บไว้เป็นบันทึก — order, invoice, audit log ค่าเริ่มต้น `RESTRICT` บังคับให้คุณตัดสินใจ
+  อย่างชัดเจน ซึ่งมักเป็นสิ่งที่คุณต้องการ
+</Note>
+
+<Note title="Foreign key ไม่ได้ถูกสร้าง index ให้อัตโนมัติ" type="warning">
+  PostgreSQL สร้าง index ให้ฝั่ง primary key แต่ **ไม่** สร้างให้คอลัมน์ที่อ้างอิง `orders.user_id`
+  ไม่มี index เว้นแต่คุณจะสร้างเอง — และถ้าไม่มี ทั้งการค้นหาด้วย `WHERE user_id = ?` และการลบแบบ cascade
+  จะต้องสแกนทั้งตาราง เพิ่ม index เข้าไป:
+
+  ```sql
+  CREATE INDEX idx_orders_user_id ON orders(user_id);
+  ```
+
+  นี่คือสาเหตุที่พบบ่อยที่สุดของ query ที่ช้าในโค้ดเบสที่ยังใหม่ ดู
+  [Indexes](/docs/sql-postgresql-basics/indexes)
+</Note>
+
+## เพิ่ม constraint ทีหลัง
+
+```sql showLineNumbers
+ALTER TABLE users ADD CONSTRAINT users_email_unique UNIQUE (email);
+ALTER TABLE orders ADD CONSTRAINT orders_qty_positive CHECK (quantity > 0);
+ALTER TABLE orders
+    ADD CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES users(id);
+
+ALTER TABLE orders DROP CONSTRAINT orders_qty_positive;
+```
+
+การเพิ่ม constraint จะล้มเหลวถ้าแถวข้อมูลที่มีอยู่แล้วขัดกับกฎนั้น — ซึ่งเป็นข้อมูลที่เป็นประโยชน์ แต่หมายความว่าคุณต้องเคลียร์ข้อมูลก่อน
+
+## แนวทางปฏิบัติที่ดี
+
+- **ทุกตารางต้องมี primary key**
+- **ทุกการอ้างอิงระหว่างตารางต้องมี foreign key** ค่าใช้จ่ายเล็กน้อยตอนเขียนข้อมูลแลกมากับการรับประกันว่าข้อมูลของคุณไม่มีวันเสียหายเชิงโครงสร้าง
+- **ทำ index ให้คอลัมน์ foreign key ของคุณ**
+- **ตั้ง `NOT NULL` เป็นค่าเริ่มต้น** อนุญาตให้เป็น null อย่างจงใจเท่านั้น
+- **ตั้งชื่อ constraint เอง** (`orders_qty_positive`) แทนที่จะปล่อยให้ PostgreSQL สร้างชื่อให้ — error message จะอ่านง่ายขึ้นและการลบทีหลังก็ตรงไปตรงมา
+- **เพิ่ม `CHECK` constraint ให้เยอะๆ** แทบไม่มีต้นทุนอะไรเลยและยังบันทึกสมมติฐานของคุณไว้ใน schema เองด้วย
+- **จัดการ constraint violation เป็น error ที่คาดไว้แล้ว** ใน application code แทนที่จะพยายามเช็คล่วงหน้า
+
+<CardGrid>
+  <Card
+    title="Querying Data →"
+    href="/docs/sql-postgresql-basics/querying"
+    description="SELECT, WHERE, ORDER BY, LIMIT — และพฤติกรรมของ NULL"
+  />
+</CardGrid>

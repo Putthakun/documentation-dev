@@ -1,0 +1,64 @@
+---
+title: รู้จัก Version Control
+description: ทำไม version control ถึงมีอยู่ และโมเดลความคิดหลักของ Git — working directory, staging area และ repository
+keywords: ["git", "version control", "vcs", "working directory", "staging area", "repository"]
+---
+
+## Version control คืออะไร?
+
+Version control คือระบบที่บันทึกการเปลี่ยนแปลงของไฟล์ตามเวลา เพื่อให้คุณย้อนกลับไปดูเวอร์ชันใดเวอร์ชันหนึ่งได้ในภายหลัง ถ้าไม่มีระบบนี้ "การสำรองไฟล์" มักจะกลายเป็นไฟล์ชื่อ `final.go`, `final_v2.go`, `final_v2_ACTUALLY_FINAL.go` — ซึ่งจะพังทันทีที่มีมากกว่าหนึ่งคนแตะต้องโค้ดนั้น
+
+ระบบ version control (VCS) ให้คุณได้:
+
+- **History** — ทุกการเปลี่ยนแปลง ใครเป็นคนทำ และทำไม (ผ่าน commit message)
+- **Branching** — ความสามารถในการทำ feature หรือ fix ใหม่โดยไม่แตะโค้ดที่ทำงานอยู่
+- **Collaboration** — หลายคนแก้ไข codebase เดียวกันได้โดยไม่เขียนทับกัน
+- **Safety** — ความสามารถในการยกเลิกการเปลี่ยนแปลงที่พังและกู้สถานะก่อนหน้ากลับมา
+
+**Git** เป็น VCS แบบ *distributed*: นักพัฒนาทุกคนมีสำเนาประวัติทั้งหมดของ repository อยู่บนเครื่องตัวเอง ไม่ใช่แค่ snapshot จากเซิร์ฟเวอร์กลาง นี่คือเหตุผลที่คำสั่ง Git ส่วนใหญ่ (commit, log, diff, branch) ทำงานได้ทันทีและออฟไลน์ — มีแค่ `push`/`pull`/`fetch` เท่านั้นที่ต้องใช้เน็ตเวิร์ก
+
+<Note title="Git vs GitHub" type="success">
+  Git คือตัวเครื่องมือ version control เอง (รันบนเครื่องคุณ) ส่วน GitHub (หรือ GitLab, Bitbucket)
+  เป็นบริการโฮสต์ repository ของ Git ที่เพิ่ม pull request, issue tracking และ CI/CD เข้ามาด้านบน
+  คุณสามารถใช้ Git ได้โดยไม่ต้องแตะ GitHub เลยก็ได้
+</Note>
+
+## โมเดลความคิดสามพื้นที่ของ Git
+
+การเข้าใจ Git คือการเข้าใจสามพื้นที่ที่ไฟล์จะผ่าน:
+
+1. **Working Directory** — ไฟล์จริงบนดิสก์ที่คุณกำลังแก้ไข
+2. **Staging Area (Index)** — ฉบับร่างของ commit ถัดไป คุณเลือกได้เองว่าอะไรจะเข้าไปบ้าง
+3. **Repository (`.git` directory)** — ประวัติที่ถูก commit ไว้อย่างถาวร
+
+<Mermaid chart="graph LR
+  A[Working Directory] -->|git add| B[Staging Area]
+  B -->|git commit| C[Repository / .git]
+  C -->|git checkout| A" />
+
+ขั้นตอน staging นี้เองที่ทำให้ Git ต่างจากเครื่องมือ VCS แบบง่ายๆ อื่นๆ: คุณไม่ได้ commit "ทุกอย่างที่เปลี่ยน" แต่ commit *เฉพาะสิ่งที่คุณ `git add`* — ซึ่งเป็นสิ่งที่ทำให้เกิด commit เล็กๆ ที่โฟกัสและเป็น atomic ได้ (รายละเอียดเพิ่มเติมใน [Git Basics](/docs/git-workflow/basics))
+
+## วงจรชีวิตของไฟล์
+
+ไฟล์ทุกไฟล์ใน Git repository จะอยู่ในสถานะใดสถานะหนึ่งต่อไปนี้:
+
+| สถานะ | ความหมาย |
+|---|---|
+| **Untracked** | Git ยังไม่รู้จักไฟล์นี้ (ไฟล์ใหม่ที่ยังไม่เคยถูก `git add`) |
+| **Unmodified / Tracked** | ถูก commit แล้ว และไม่มีการเปลี่ยนแปลงตั้งแต่ commit ล่าสุด |
+| **Modified** | ถูก track อยู่ และมีการเปลี่ยนแปลงตั้งแต่ commit ล่าสุด — แต่ยังไม่ได้ stage |
+| **Staged** | มีการเปลี่ยนแปลง และถูกทำเครื่องหมาย (ผ่าน `git add`) ให้เข้าไปใน commit ถัดไป |
+
+`git status` (จะพูดถึงถัดไป) บอกคุณได้แบบละเอียดว่าไฟล์แต่ละไฟล์อยู่ในสถานะไหน — เป็นคำสั่งที่ถูกใช้บ่อยที่สุดในคู่มือทั้งชุดนี้
+
+## ทำไมเรื่องนี้ถึงสำคัญกับคุณ
+
+สำหรับมือใหม่สายงานแรก ความปวดหัวส่วนใหญ่กับ Git ไม่ได้มาจากการไม่รู้คำสั่ง แต่มาจากการไม่รู้ว่าการเปลี่ยนแปลงนั้น *อยู่ในพื้นที่ไหน* ตอนนี้ "ฉัน commit ไปแล้วแต่เพื่อนร่วมทีมยังไม่เห็น" (มันอยู่ใน repo local ของคุณ ยังไม่ได้ push) "ฉัน `git add` ไปแล้วแต่มันไม่อยู่ใน commit" (คุณแก้ไขไฟล์นั้นอีกครั้งหลัง stage แล้ว — working directory เปลี่ยนไปอีกครั้ง) การจำโมเดลสามพื้นที่นี้ไว้ในหัวจะช่วยแก้ความสับสนเกี่ยวกับ Git ได้ 90% ตั้งแต่ต้น
+
+<CardGrid>
+  <Card
+    title="Git Basics →"
+    href="/docs/git-workflow/basics"
+    description="นำโมเดลนี้มาใช้จริง: init, add, commit, status, log"
+  />
+</CardGrid>

@@ -1,0 +1,183 @@
+---
+title: เริ่มต้นและติดตั้ง
+description: relational database คืออะไร ทำไมต้อง PostgreSQL และการรันเซิร์ฟเวอร์ในเครื่องด้วย Docker กับ psql
+keywords: ["postgresql", "relational database", "psql", "docker postgres", "sql basics"]
+---
+
+## relational database คืออะไร
+
+relational database เก็บข้อมูลในรูปแบบ **ตาราง (tables)** — แถวและคอลัมน์ เหมือนสเปรดชีตที่มีกฎเกณฑ์ ส่วนคำว่า "relational" หมายถึงตารางเหล่านี้อ้างอิงถึงกันได้: แถวของ order จะชี้ไปที่ user ที่สั่งซื้อ แทนที่จะก็อปปี้ข้อมูลของ user นั้นซ้ำไปซ้ำมา
+
+มีสองสิ่งที่ทำให้คุ้มค่ากว่าการใช้ไฟล์หรือ key–value store:
+
+- **ฐานข้อมูลช่วยรับประกันความถูกต้อง** ทั้ง type, field ที่จำเป็น, ความไม่ซ้ำ (uniqueness) และการอ้างอิงระหว่างตาราง ล้วนถูกตรวจสอบโดยตัวฐานข้อมูลเอง ข้อมูลที่ผิดพลาดจะถูกปฏิเสธไม่ว่าจะมาจาก service หรือ script ไหนก็ตาม
+- **คุณอธิบายว่า *อยากได้อะไร* ไม่ใช่ *ทำอย่างไร*** SQL เป็นภาษาแบบ declarative คุณเขียนว่า "เอาแถวเหล่านี้มา join กับแถวเหล่านั้น แล้วเรียงตามวันที่" ส่วน query planner จะหาวิธีที่เร็วที่สุดให้เอง
+
+## ทำไมต้อง PostgreSQL
+
+มันเป็นตัวเลือกเริ่มต้นของทีม backend ส่วนใหญ่:
+
+- **Open source** ไม่มีค่าไลเซนส์ ไม่ผูกติดกับ vendor ใด
+- **เข้มงวดเรื่องความถูกต้อง** — มันจะไม่ตัดข้อมูลของคุณทิ้งเงียบๆ หรือแปลงค่าที่ผิดให้กลายเป็นค่าที่ใช้ได้แบบที่บางฐานข้อมูลทำ
+- **รองรับ ACID transaction เต็มรูปแบบ** (อธิบายใน [Transactions](/docs/sql-postgresql-basics/transactions))
+- **มีมากกว่าแค่ที่เก็บตารางธรรมดา** — JSONB, full-text search, ข้อมูลเชิงพื้นที่ (geospatial) และ array column ล้วนมีในตัว ทำให้หลายครั้งคุณไม่ต้องใช้ datastore ตัวที่สองเลย
+
+## รัน PostgreSQL ในเครื่องตัวเอง
+
+Docker คือวิธีที่เร็วที่สุด และช่วยให้เครื่องของคุณสะอาด ไม่มีอะไรติดตั้งเกลื่อน:
+
+<Tabs defaultValue="docker" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="docker">Docker</TabsTrigger>
+    <TabsTrigger value="compose">Docker Compose</TabsTrigger>
+    <TabsTrigger value="brew">Homebrew</TabsTrigger>
+  </TabsList>
+  <TabsContent value="docker">
+```bash showLineNumbers
+docker run --name pg -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=shop -p 5432:5432 -d postgres:17
+```
+  </TabsContent>
+  <TabsContent value="compose">
+```yaml showLineNumbers title="docker-compose.yml"
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: shop
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+  </TabsContent>
+  <TabsContent value="brew">
+```bash showLineNumbers
+brew install postgresql@17
+brew services start postgresql@17
+createdb shop
+```
+  </TabsContent>
+</Tabs>
+
+<Note title="Named volume สำคัญมาก" type="warning">
+  คำสั่ง `docker run` แบบธรรมดาด้านบนจะเก็บข้อมูลไว้ในตัว container เอง — ถ้าลบ container ทิ้ง
+  ข้อมูลก็หายไปด้วย ซึ่งก็โอเคสำหรับการลองเล่นแบบไม่จริงจัง แต่ถ้าต้องการเก็บข้อมูลไว้ข้ามการ restart
+  ให้ใช้เวอร์ชัน Compose ที่มี named volume (`pgdata`) แทน
+</Note>
+
+## เชื่อมต่อด้วย psql
+
+`psql` คือ terminal แบบ interactive ของ PostgreSQL การเรียนรู้คำสั่งบางส่วนของมันช่วยประหยัดเวลาได้มาก:
+
+```bash showLineNumbers
+# Connect (into the Docker container)
+docker exec -it pg psql -U postgres -d shop
+
+# Or from your machine, using a connection URL
+psql "postgres://postgres:secret@localhost:5432/shop"
+```
+
+เมื่อเชื่อมต่อแล้ว คำสั่งที่ขึ้นต้นด้วย backslash จะช่วยให้ตรวจสอบฐานข้อมูลได้:
+
+| คำสั่ง | แสดงอะไร |
+|---|---|
+| `\l` | แสดงรายชื่อฐานข้อมูลทั้งหมด |
+| `\c dbname` | เชื่อมต่อไปยังฐานข้อมูลอื่น |
+| `\dt` | แสดงรายชื่อตาราง |
+| `\d users` | อธิบายตาราง `users` — คอลัมน์, ชนิดข้อมูล, index, constraint |
+| `\di` | แสดงรายชื่อ index |
+| `\x` | สลับโหมดแสดงผลแบบขยาย (expanded output) — เหมาะกับแถวที่มีข้อมูลกว้าง |
+| `\timing` | แสดงเวลาที่แต่ละ query ใช้ |
+| `\?` | ความช่วยเหลือสำหรับคำสั่ง backslash |
+| `\q` | ออกจากโปรแกรม |
+
+<Note title="Connection string" type="success">
+  รูปแบบ URL `postgres://user:password@host:port/dbname` คือรูปแบบที่ library และเครื่องมือแทบทุกตัวรองรับ
+  รวมถึง pgx ของ Go ด้วย ควรเก็บไว้ในตัวแปรสภาพแวดล้อม — ตามธรรมเนียมนิยมใช้ชื่อ `DATABASE_URL` —
+  และห้าม hardcode credential ไว้ในซอร์สโค้ดเด็ดขาด สำหรับการเชื่อมต่อบน production ให้เพิ่ม `?sslmode=require`
+</Note>
+
+## Schema ที่ใช้ตลอดทั้งส่วนนี้
+
+ทุกหน้าตั้งแต่จุดนี้เป็นต้นไปจะใช้ e-commerce schema เล็กๆ ชุดนี้ เพื่อให้ตัวอย่างต่อยอดกันไปเรื่อยๆ:
+
+```sql showLineNumbers title="schema.sql"
+CREATE TABLE users (
+    id         BIGSERIAL PRIMARY KEY,
+    email      TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE products (
+    id    BIGSERIAL PRIMARY KEY,
+    name  TEXT NOT NULL,
+    price_cents INTEGER NOT NULL CHECK (price_cents >= 0)
+);
+
+CREATE TABLE orders (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES users(id),
+    product_id BIGINT NOT NULL REFERENCES products(id),
+    quantity   INTEGER NOT NULL DEFAULT 1,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+<Mermaid chart="erDiagram
+  USERS ||--o{ ORDERS : places
+  PRODUCTS ||--o{ ORDERS : contains
+  USERS {
+    bigint id PK
+    text email UK
+    text name
+    timestamptz created_at
+  }
+  PRODUCTS {
+    bigint id PK
+    text name
+    int price_cents
+  }
+  ORDERS {
+    bigint id PK
+    bigint user_id FK
+    bigint product_id FK
+    int quantity
+    text status
+  }" />
+
+user หนึ่งคนสั่งซื้อได้หลาย order และแต่ละ order ก็อ้างอิงถึง product เดียว รายละเอียดทั้งหมดของ schema นี้จะอธิบายในสองหน้าถัดไป
+
+## ธรรมเนียมการเขียนไวยากรณ์ SQL
+
+```sql showLineNumbers
+-- Two dashes start a comment
+
+-- Keywords are case-insensitive, but UPPERCASE for keywords and
+-- lowercase for identifiers is the near-universal convention:
+SELECT name FROM users WHERE id = 1;
+
+-- Statements end with a semicolon. In psql, nothing runs until you type one.
+```
+
+## แนวทางปฏิบัติที่ดี
+
+- **รัน PostgreSQL บน Docker ในเครื่องตัวเอง** และใช้ major version ให้ตรงกับ environment ที่ใช้จริงบน production — เพราะพฤติกรรมจะเปลี่ยนไปตามเวอร์ชัน
+- **จำคำสั่ง `\d table_name` ให้ขึ้นใจ** มันตอบคำถาม "ตารางนี้หน้าตาเป็นยังไง" ได้ทันที
+- **ใช้ `\timing`** ระหว่างเรียนรู้ เพื่อให้เริ่มมีความรู้สึกว่า query ไหนช้า
+- **เก็บ credential ไว้ในตัวแปรสภาพแวดล้อม** ห้ามเขียนไว้ในโค้ดหรือ commit ลงไฟล์เด็ดขาด
+- **ห้ามทดลองบน production เด็ดขาด** ควรมีฐานข้อมูลในเครื่องที่พร้อมให้พังได้อย่างอิสระ
+
+<CardGrid>
+  <Card
+    title="Tables & Data Types →"
+    href="/docs/sql-postgresql-basics/tables-data-types"
+    description="CREATE TABLE และการเลือก column type ให้เหมาะสม"
+  />
+</CardGrid>

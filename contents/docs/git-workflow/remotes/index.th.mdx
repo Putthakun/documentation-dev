@@ -1,0 +1,81 @@
+---
+title: การทำงานกับ Remote
+description: การเชื่อมต่อกับ remote repository — remote, fetch, pull, push และ tracking branch
+keywords: ["git remote", "git fetch", "git pull", "git push", "tracking branch", "origin"]
+---
+
+## Remote คืออะไร?
+
+Remote คือตัวชี้ไปยังสำเนาอื่นของ repository — ส่วนใหญ่โฮสต์อยู่บน GitHub, GitLab หรือที่คล้ายกัน ตามธรรมเนียมแล้ว remote ที่คุณ clone มาจะถูกตั้งชื่อว่า `origin`
+
+```bash showLineNumbers
+git remote -v                                  # แสดงรายการ remote และ URL ของมัน
+git remote add origin https://github.com/org/repo.git   # เพิ่ม remote (ถ้าคุณเริ่มด้วย git init)
+```
+
+## fetch vs pull
+
+จุดนี้ทำให้มือใหม่หลายคนสับสน:
+
+```bash showLineNumbers
+git fetch origin    # ดาวน์โหลด commit/branch ใหม่จาก remote แต่ไม่ merge
+git pull origin main # fetch แล้ว merge (หรือ rebase ถ้าตั้งค่าไว้) เข้า branch ปัจจุบัน
+```
+
+<Mermaid chart="graph TD
+  R[Remote: origin/main] -->|git fetch| L1[Local: origin/main updated]
+  L1 -->|git merge| L2[Local: main updated]
+  R -->|git pull = fetch + merge| L2" />
+
+`git fetch` ปลอดภัยเสมอ — มันแค่อัปเดตข้อมูลในเครื่องคุณเกี่ยวกับ remote (`origin/main`) โดยไม่แตะไฟล์ที่คุณกำลังทำงานอยู่ ส่วน `git pull` จะรวมการเปลี่ยนแปลงนั้นเข้ากับ branch ปัจจุบันทันที ซึ่งอาจก่อให้เกิด merge หรือ conflict ได้ทันที
+
+<Note title="Best practice" type="success">
+  ถ้าไม่แน่ใจ ให้ `git fetch` ก่อนแล้วตรวจสอบว่ามีอะไรเปลี่ยนไป (`git log origin/main`) ก่อน
+  pull วิธีนี้มีประโยชน์มากโดยเฉพาะก่อน rebase หรือเมื่อคุณไม่แน่ใจว่าเพื่อนร่วมทีม push อะไรมาบ้าง
+</Note>
+
+## Push งานของคุณ
+
+```bash showLineNumbers
+git push origin feature/rate-limiting          # push branch เป็นครั้งแรก
+git push -u origin feature/rate-limiting        # เหมือนกัน แต่ตั้ง upstream tracking ด้วย
+git push                                        # เมื่อตั้ง tracking แล้ว ใช้แค่นี้ก็พอ
+```
+
+flag `-u` (`--set-upstream`) เชื่อม local branch ของคุณเข้ากับ remote branch ทำให้ `git push`/`git pull` ครั้งต่อไปบน branch นั้นไม่ต้องพิมพ์ `origin <branch>` เต็มๆ ทุกครั้ง — และ `git status` จะบอกคุณได้ว่าคุณนำหน้า/ตามหลัง remote อยู่หรือไม่
+
+## Tracking branch
+
+```bash showLineNumbers
+git status                 # แสดง "Your branch is ahead of 'origin/main' by 2 commits"
+git branch -vv              # แสดง local branch ทุกอันและสิ่งที่มัน track อยู่
+```
+
+## Force push
+
+```bash showLineNumbers
+git push --force              # อันตราย: เขียนทับประวัติของ remote
+git push --force-with-lease   # ปลอดภัยกว่า: จะล้มเหลวถ้า remote มี commit ที่คุณยังไม่เคยเห็น
+```
+
+<Note title="Danger" type="danger">
+  force-push เฉพาะ branch ที่เป็นของคุณคนเดียว (มักหลัง rebase) การ force-push ไปยัง branch
+  ที่ใช้ร่วมกันอย่าง `main` อาจลบ commit ของเพื่อนร่วมทีมไปโดยไม่รู้ตัว แนะนำให้ใช้
+  `--force-with-lease` — มันจะปฏิเสธการ push ถ้ามีคนอื่น push เข้า branch นั้นตั้งแต่คุณ fetch
+  ครั้งล่าสุด ป้องกันไม่ให้คุณเผลอทับงานของคนอื่น
+</Note>
+
+## Best practices
+
+- **Pull ก่อน push** ถ้า remote มีการเปลี่ยนไปแล้ว push จะถูกปฏิเสธทันที — fetch/pull (หรือ rebase) ก่อน
+- **Push บ่อยๆ แต่เนิ่นๆ** บน feature branch ของตัวเอง — เป็นการสำรองข้อมูลฟรีๆ และให้เพื่อนร่วมทีมเห็นความคืบหน้าของงานคุณ
+- **อย่า force-push ไปยัง `main` หรือ branch ที่ใช้ร่วมกันเด็ดขาด**
+- **ตั้ง tracking branch (`-u`)** ตอน push branch ใหม่เป็นครั้งแรก เพื่อให้คำสั่งครั้งต่อๆ ไปง่ายขึ้น
+
+<CardGrid>
+  <Card
+    title="Resolving Merge Conflicts →"
+    href="/docs/git-workflow/resolving-conflicts"
+    description="ต้องทำอย่างไรเมื่อ git pull หรือ git merge ไม่สามารถรวมการเปลี่ยนแปลงให้อัตโนมัติได้"
+  />
+</CardGrid>

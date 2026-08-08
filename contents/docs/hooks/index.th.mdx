@@ -1,0 +1,212 @@
+---
+title: Hook
+description: รันคำสั่ง shell อัตโนมัติในจุดที่กำหนดไว้ตลอด lifecycle ของ Claude Code
+keywords: ["claude code hooks", "PreToolUse", "PostToolUse", "settings.json", "hook exit codes", "UserPromptSubmit"]
+---
+
+## มันคืออะไร
+
+CLAUDE.md และ skills คือ context — Claude อ่านมันและ *มักจะ* ทำตาม แต่ไม่มีอะไรบังคับ Hooks
+คือสิ่งตรงกันข้าม: คำสั่ง shell ที่ Claude Code รันอัตโนมัติในจุดที่กำหนดไว้ตลอด lifecycle ของมัน
+โดยไม่มีการตัดสินใจของ LLM เข้ามาเกี่ยวข้อง hook จะทำงานไม่ว่า Claude จะ "ตัดสินใจ" ทำหรือไม่ — นั่นคือ
+ประเด็นทั้งหมดของมัน ใช้ hooks กับสิ่งที่ต้องเกิดขึ้นแบบ deterministic เท่านั้น: บล็อกคำสั่งอันตราย
+format ไฟล์ทุกครั้งหลัง edit หรือ log ทุก tool call ไม่ว่า Claude จะคิดว่าอะไรเป็นความคิดที่ดีใน
+ตอนนั้นหรือไม่
+
+## Hook events
+
+| Event | ทำงานเมื่อ |
+|---|---|
+| `SessionStart` | เมื่อ session เริ่มต้นหรือ resume |
+| `UserPromptSubmit` | เมื่อคุณ submit prompt ก่อน Claude จะประมวลผล |
+| `PreToolUse` | ก่อน tool call จะทำงาน — สามารถบล็อกได้ |
+| `PostToolUse` | หลัง tool call สำเร็จ |
+| `PostToolUseFailure` | หลัง tool call ล้มเหลว |
+| `Notification` | เมื่อ Claude Code ส่ง notification (เช่น รอ input) |
+| `Stop` | เมื่อ Claude ตอบจบ turn |
+| `SubagentStop` | เมื่อ subagent ทำงานเสร็จ |
+| `PreCompact` | ก่อน context compaction |
+| `SessionEnd` | เมื่อ session สิ้นสุด |
+
+`PreToolUse`, `PostToolUse`, และ `PostToolUseFailure` กรองด้วยชื่อ tool ผ่าน `matcher` (เช่น
+`Bash`, `Edit|Write`, หรือ regex อย่าง `mcp__.*` สำหรับ MCP tools) `SessionStart` และ `SessionEnd`
+กรองด้วยวิธีที่ session เริ่มหรือจบ (`startup`, `resume`, `compact`, `clear`, ...)
+`UserPromptSubmit` และ `Stop` ไม่รับ matcher — มันทำงานทุกครั้งที่เกิด event
+
+## การตั้งค่า hooks
+
+Hooks อยู่ภายใต้ key `hooks` ในไฟล์ settings ไฟล์ที่คุณใช้เป็นตัวกำหนด scope:
+
+| ตำแหน่ง | Scope | แชร์ได้ไหม |
+|---|---|---|
+| `~/.claude/settings.json` | ทุกโปรเจกต์ของคุณ | ไม่ |
+| `.claude/settings.json` | โปรเจกต์นี้ | ได้ — commit ได้เลย |
+| `.claude/settings.local.json` | โปรเจกต์นี้ เฉพาะคุณ | ไม่ — ใส่ใน gitignore |
+
+```json title=".claude/settings.json"
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | xargs npx prettier --write"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+แต่ละ event key เก็บ array ของ matcher group และแต่ละ group เก็บ array ของ hooks ที่จะรันเมื่อ
+matcher นั้น trigger รัน `/hooks` ในระหว่าง session เพื่อดูทุกอย่างที่ตั้งค่าไว้ตอนนี้ จัดกลุ่มตาม
+event พร้อมจำนวนกำกับข้าง event ที่มี hooks ผูกอยู่
+
+## Input และ output
+
+Hook รับ JSON ผ่าน stdin ทุก event มี `session_id`, `cwd`, และ `hook_event_name` แต่ละ event
+เพิ่ม field ของตัวเองเข้ามา hook `PreToolUse` ที่เฝ้าดู `Bash` จะได้รับคำสั่งที่กำลังจะรัน:
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/Users/you/project",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf build/" }
+}
+```
+
+Hook ตอบกลับผ่าน **exit code** และ optionally ผ่าน **stdout**:
+
+| Exit code | ความหมาย |
+|---|---|
+| `0` | ไม่มีข้อคัดค้าน — action ดำเนินต่อ สำหรับ `PreToolUse` นี่ไม่ได้แปลว่า *อนุมัติ* การเรียกใช้
+งาน — permission check ปกติยังคงทำงานอยู่ |
+| `2` | บล็อก action เขียนเหตุผลไปที่ stderr — Claude จะได้รับเป็น feedback และปรับตัวได้ |
+| อื่น ๆ | Action ดำเนินต่อ; ถือเป็น error ที่ไม่บล็อก |
+
+<Note type="warning">
+  ไม่ใช่ทุก event ที่บล็อกได้ Exit 2 บน `SessionStart` หรือ `Notification` เช่น จะแค่แสดงข้อความ
+  stderr ให้คุณเห็นแล้วดำเนินต่อ — มันหยุด session ไม่ให้เริ่มไม่ได้
+</Note>
+
+สำหรับการควบคุมที่มากกว่า "block หรือไม่ block" ให้ exit `0` และ print JSON object ออกทาง stdout
+แทนการพึ่ง exit code อย่างเดียว:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Use rg instead of grep — faster on this codebase"
+  }
+}
+```
+
+`permissionDecision` รับค่า `allow`, `deny`, หรือ `ask` อย่าผสม exit-2-and-stderr กับ
+exit-0-and-JSON ใน hook เดียวกัน — Claude Code จะเมิน JSON output ทุกครั้งที่ hook exit ด้วย 2
+
+`PostToolUse` และ `Stop` hooks ใช้รูปแบบที่ต่างออกไปเล็กน้อย — top-level `"decision": "block"`
+บวกกับ `"reason"` — เพราะไม่มี tool call เหลือให้ปฏิเสธ มีแค่ feedback ที่ส่งกลับไปเท่านั้น
+
+## กรณีใช้งาน
+
+### บล็อกคำสั่งอันตราย
+
+```bash title=".claude/hooks/block-dangerous.sh" showLineNumbers
+#!/bin/bash
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command')
+
+if echo "$COMMAND" | grep -qE 'rm -rf (/|~|\.\.)'; then
+  echo "Refusing rm -rf on a root-ish path. Be specific." >&2
+  exit 2
+fi
+
+exit 0
+```
+
+```json title=".claude/settings.json"
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/block-dangerous.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`${CLAUDE_PROJECT_DIR}` ทำให้ path ของ hook ไม่ผูกกับตำแหน่งใดตำแหน่งหนึ่ง จึงทำงานเหมือนกัน
+ไม่ว่า repo จะถูก checkout ไว้ที่ไหน
+
+### Auto-format หลังทุก edit
+
+```json title=".claude/settings.json"
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "jq -r '.tool_input.file_path' | xargs npx prettier --write" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Log ทุกคำสั่งที่ Claude รัน
+
+```json title="~/.claude/settings.json"
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "jq -r '.tool_input.command' >> ~/.claude/command-log.txt" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Hook แบบ user-scoped ส่วนตัวแบบนี้เป็นค่า default ที่ดีสำหรับสิ่งที่คุณอยากให้มีทุกที่โดยไม่ต้อง
+commit ลงทุกโปรเจกต์ — ส่วน enforcement เฉพาะโปรเจกต์ (การ format, การบล็อกคำสั่งอันตรายที่ทั้งทีม
+ควรมี) ให้ใส่ใน `.claude/settings.json` แทน เพื่อให้มันติดไปกับ repo
+
+## แนวทางที่ดี
+
+- **Match ให้แคบที่สุดเท่าที่ทำได้** matcher อย่าง `Edit|Write` แทนที่จะจับทุก tool call, เงื่อนไข
+  `if` ที่ scope เฉพาะรูปแบบคำสั่งที่คุณสนใจจริง ๆ — การ match ที่แคบหมายถึง overhead น้อยลงและ
+  false positive ที่บล็อกงานถูกต้องน้อยลง
+- **Exit 2 + stderr หรือ exit 0 + JSON — อย่าผสมกัน** เลือกกลไกควบคุมอย่างใดอย่างหนึ่งต่อ hook
+  หนึ่งตัว Claude Code จะเมิน JSON path ทันทีที่คุณ exit ด้วย 2
+- **ทำให้ hook script รันเร็ว** มันรันแบบ synchronous อยู่ใน tool-call path (timeout default 600
+  วินาที มักตั้งไว้ต่ำกว่านั้นมาก) hook ที่ช้าคือ session ที่ช้าสำหรับทุกคนที่ใช้ tool call ที่มัน
+  match
+- **เก็บ script ไว้ใน `.claude/hooks/`** และอ้างอิงด้วย `${CLAUDE_PROJECT_DIR}` เพื่อให้ portable
+  ข้าม checkout และ review ได้ใน PR เดียวกับโค้ดที่มัน enforce
+- **เลือกใช้ hook แทนคำสั่งใน CLAUDE.md** สำหรับสิ่งที่ต้องเกิดขึ้นทุกครั้งโดยไม่มีเงื่อนไข —
+  "format เสมอ" "อย่าแตะไฟล์นี้เด็ดขาด" CLAUDE.md คือคำขอที่ Claude มักทำตาม แต่ hook ไม่ใช่ทางเลือก
+- **ใช้ `/hooks` เพื่อยืนยัน** ว่า hook ใหม่ลงทะเบียนจริง ก่อนจะพึ่งพามัน — การพิมพ์ผิดใน
+  `settings.json` จะทำให้ hook นั้นล้มเหลวแบบเงียบ ๆ ไม่ error ดัง ๆ
+
+<CardGrid>
+  <Card
+    title="Status Line →"
+    href="/docs/status-line"
+    description="ปรับแต่งสิ่งที่ Claude Code แสดงใน status line ของ terminal"
+  />
+</CardGrid>

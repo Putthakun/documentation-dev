@@ -1,0 +1,135 @@
+---
+title: Slash Command
+description: คำสั่ง slash ที่มีมาให้และแบบกำหนดเองใน Claude Code และวิธีเขียนของคุณเอง
+keywords: ["claude code slash commands", "custom commands", ".claude/commands", "skills", "frontmatter", "arguments"]
+---
+
+## มันคืออะไร
+
+Slash commands คือคำสั่งลัดแบบ `/thing` ที่คุณพิมพ์ที่ prompt ของ Claude Code: `/clear`,
+`/compact`, `/model`, `/agents` บางคำสั่งมีมาให้ในตัว CLI พร้อม behavior ที่เขียนโค้ดไว้ —
+`/compact` รัน summarization pass จริง ๆ `/clear` reset session จริง ๆ ส่วนที่เหลือเป็นแค่ prompt
+ที่เก็บไว้บนดิสก์ ซึ่งจะถูกขยายเป็นข้อความเมื่อคุณพิมพ์ชื่อมัน สิ่งเหล่านั้นคือ **custom commands**
+และในเวอร์ชันล่าสุดของ Claude Code มันถูกรวมเข้าไปในกลไกที่กว้างขึ้นเรียกว่า **skills** — ไฟล์ที่
+`.claude/commands/deploy.md` และ skill ที่ `.claude/skills/deploy/SKILL.md` ต่างก็สร้าง `/deploy`
+และทำงานเหมือนกัน ไฟล์ `.claude/commands/` ที่มีอยู่แล้วยังทำงานได้เหมือนเดิมไม่เปลี่ยนแปลง
+
+ความแตกต่างที่สำคัญในการใช้งานประจำวัน: built-in commands มี logic เขียนอยู่ใน CLI เอง
+(`/compact`, `/clear`, `/model`) ส่วนที่เหลือทั้งหมด — custom commands และ skills — คือ prompt
+ที่ Claude อ่าน โดยอาจมีคำสั่งที่ Claude ตัดสินใจรันเองได้ด้วย
+
+## คำสั่ง built-in ที่มีประโยชน์
+
+ชุดคำสั่งที่ใช้บ่อย จัดกลุ่มตามสิ่งที่คุณใช้มันทำ:
+
+| คำสั่ง | ทำอะไร |
+|---|---|
+| `/clear` | เริ่มบทสนทนาใหม่ โดยเก็บ project memory ไว้ |
+| `/compact` | สรุปบทสนทนาเพื่อคืน context ว่าง |
+| `/model` | สลับ model ระหว่าง session |
+| `/agents` | สร้างและจัดการ subagent configuration |
+| `/memory` | เปิด CLAUDE.md และไฟล์ auto-memory เพื่อแก้ไข |
+| `/context` | แสดงรายละเอียดว่าอะไรใช้ context window ของคุณไปบ้าง |
+| `/init` | สร้าง CLAUDE.md เริ่มต้นด้วยการวิเคราะห์ codebase |
+| `/permissions` | ตั้งกฎอนุมัติสำหรับการเข้าถึงไฟล์และคำสั่ง |
+| `/hooks` | เรียกดู hooks ที่ตั้งค่าไว้ตาม event |
+| `/rewind` | ย้อนโค้ดและบทสนทนากลับไปยัง checkpoint ก่อนหน้า |
+| `/resume` | กลับไปยังบทสนทนาก่อนหน้า |
+| `/usage` | แสดงการใช้ token และค่าใช้จ่ายของ session |
+
+รัน `/help` ในระหว่าง session เพื่อดูรายการทั้งหมดที่ตรงกับเวอร์ชันปัจจุบัน — คำสั่งใหม่ออกมาบ่อยพอ
+ที่รายการในหน้านี้จะล้าสมัยได้
+
+## เขียน custom command
+
+วางไฟล์ markdown ไว้ใน `.claude/commands/` (ระดับโปรเจกต์) หรือ `~/.claude/commands/` (ส่วนตัว)
+ชื่อไฟล์จะกลายเป็นชื่อคำสั่ง และเนื้อหาของไฟล์จะกลายเป็น prompt ที่ Claude ได้รับเมื่อคุณเรียกใช้มัน
+
+<FileTree>
+  <Folder name=".claude" defaultOpen>
+    <Folder name="commands" defaultOpen>
+      <File name="deploy.md" />
+      <File name="fix-issue.md" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+```markdown title=".claude/commands/fix-issue.md"
+---
+description: Fix a GitHub issue by number
+disable-model-invocation: true
+---
+
+Fix GitHub issue $ARGUMENTS following our coding standards. Read the issue with
+`gh issue view $ARGUMENTS` first, then implement the fix and open a PR.
+```
+
+พิมพ์ `/fix-issue 482` จะขยายไฟล์เป็นข้อความโดยแทน `$ARGUMENTS` ด้วย `482`
+
+### Frontmatter ที่สำคัญที่สุด
+
+| Field | หน้าที่ |
+|---|---|
+| `description` | แสดงใน autocomplete และเป็นสิ่งที่ Claude อ่านเพื่อตัดสินใจว่าจะเรียกคำสั่งนี้เองหรือไม่ |
+| `disable-model-invocation` | `true` หมายถึงมีแค่คุณเท่านั้นที่ trigger มันได้ — Claude เรียกเองไม่ได้เด็ดขาด ใช้กับอะไรก็ตามที่มี side effect: deploy, commit, การส่งข้อความ |
+| `argument-hint` | คำใบ้ใน autocomplete เช่น `[issue-number]` |
+| `allowed-tools` | Tools ที่ pre-approve ไว้สำหรับ turn ที่เรียกคำสั่งนี้ เพื่อให้ Claude ไม่ต้องหยุดถาม permission กลางทาง |
+
+<Note type="warning">
+  `disable-model-invocation: true` คือค่า default ที่สำคัญสำหรับอะไรก็ตามที่ทำลายล้างได้ ถ้าไม่มี
+  มัน Claude สามารถตัดสินใจเองว่าคำสั่งแบบ `/deploy` หรือ `/commit` เป็นขั้นตอนถัดไปที่ถูกต้องแล้วรัน
+  มันได้เลย — โอเคสำหรับคำสั่ง lint แต่ไม่โอเคสำหรับอะไรที่ push ขึ้น production
+</Note>
+
+### Arguments
+
+```markdown title=".claude/commands/migrate.md"
+---
+description: Migrate a component from one framework to another
+---
+
+Migrate the $ARGUMENTS[0] component from $ARGUMENTS[1] to $ARGUMENTS[2].
+```
+
+`/migrate-component SearchBar React Vue` จะเติม `$ARGUMENTS[0]` = `SearchBar`,
+`$ARGUMENTS[1]` = `React`, `$ARGUMENTS[2]` = `Vue` `$0`, `$1`, `$2` คือรูปแบบย่อของสิ่งเดียวกัน
+Argument ที่มีหลายคำต้องใส่ quote: `/migrate "Search Bar" React Vue` ทำให้ `$0` ขยายเป็น
+`Search Bar` ถ้าเนื้อหาคำสั่งไม่ได้อ้างอิง `$ARGUMENTS` เลย Claude Code จะต่อท้าย
+`ARGUMENTS: <what you typed>` ให้ เพื่อไม่ให้ข้อความหายไปเงียบ ๆ
+
+## Commands ระดับโปรเจกต์ vs. ส่วนตัว
+
+| ตำแหน่ง | Scope | แชร์ผ่าน |
+|---|---|---|
+| `.claude/commands/` (โปรเจกต์) | ทุกคนที่ทำงานใน repo นี้ | Git — commit ไปพร้อมโค้ด |
+| `~/.claude/commands/` (ส่วนตัว) | ทุกโปรเจกต์บนเครื่องคุณ | ไม่แชร์ — เป็นของคุณคนเดียว |
+
+ใส่คำสั่ง workflow ของทีม — "รัน lint + test + format ตามลำดับของเรา", "เปิด PR ด้วย template ของ
+เรา" — ไว้ใน directory ของโปรเจกต์ เพื่อให้เพื่อนร่วมทีมที่ clone repo ได้มันมาฟรี ใส่ shortcut
+ส่วนตัว — คำสั่ง scratch-notes ของคุณเอง workflow git alias ส่วนตัว — ไว้ใน
+`~/.claude/commands/` เพื่อให้ติดตามคุณไปทุก repo โดยไม่รบกวนโปรเจกต์ของคนอื่น
+
+Skills เพิ่มรูปแบบที่เป็น directory (`.claude/skills/<name>/SKILL.md`) ที่มีพื้นที่สำหรับไฟล์
+สนับสนุน แต่สำหรับ prompt ไฟล์เดียวแบบด้านบน ไฟล์แบบแบน `.claude/commands/*.md` เป็นทางเลือกที่
+ง่ายกว่าและทำงานเหมือนกันทุกประการ
+
+## แนวทางที่ดี
+
+- **Gate อะไรก็ตามที่มี side effect** ด้วย `disable-model-invocation: true` — deploy, commit,
+  ข้อความไปยังระบบอื่น อย่าปล่อยให้ Claude เป็นคนตัดสินใจเรื่องจังหวะเวลาแทนคุณ
+- **เก็บ prompt ให้เจาะจง** คำสั่งคือ prompt ที่บันทึกไว้ ไม่ใช่เวทมนตร์ — คำสั่งที่คลุมเครือในไฟล์
+  ให้ผลลัพธ์คลุมเครือเหมือนที่พิมพ์เข้าไปตรง ๆ
+- **Commit คำสั่ง workflow ของทีมเข้า directory ของโปรเจกต์** คำสั่งที่มีแค่คุณคนเดียวมองเห็นไม่ได้
+  ช่วยคนถัดไปที่กำลัง debug deploy script เดียวกัน
+- **ใช้ `argument-hint`** เพื่อให้ autocomplete บอกคุณ (และเพื่อนร่วมทีม) ว่าคำสั่งต้องการอะไร
+  แทนที่ทุกคนต้องอ่านไฟล์ซ้ำเพื่อจำลำดับ argument
+- **เลือกใช้คำสั่งแทนการพิมพ์ซ้ำใน chat** ถ้าคุณพิมพ์คำสั่งหลายขั้นตอนเดิมเข้า Claude Code สอง
+  ครั้งแล้ว นั่นคือสัญญาณให้บันทึกมันเป็นคำสั่ง
+
+<CardGrid>
+  <Card
+    title="Memory - CLAUDE.md →"
+    href="/docs/claude-md"
+    description="วิธีที่ Claude Code โหลด memory ระดับโปรเจกต์ ส่วนตัว และองค์กร และอะไรควรอยู่ตรงนั้น"
+  />
+</CardGrid>

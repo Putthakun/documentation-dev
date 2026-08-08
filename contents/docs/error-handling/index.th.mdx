@@ -1,0 +1,365 @@
+---
+title: การจัดการ Error
+description: การจัดการ error แบบ idiomatic ใน Go
+keywords: ["golang error", "errors.Is", "errors.As", "custom error type", "sentinel error", "error wrapping"]
+---
+
+## ไปให้ไกลกว่า `if err != nil`
+
+[Errors: The Basics](/docs/golang-fundamentals/errors-basics) พูดถึงโมเดลพื้นฐานแล้ว: error คือ value,
+คุณ wrap มันด้วย `%w`, เปรียบเทียบด้วย `errors.Is`, และ log แค่ครั้งเดียวที่ชั้นบนสุด นั่นเพียงพอสำหรับ
+โปรแกรมเล็ก ๆ
+
+หน้านี้พูดถึงปัญหาขั้นถัดไป: ใน service จริง error จะผ่านสี่ห้า layer ก่อนที่ใครจะเห็นมัน และแต่ละ layer
+ก็ต้องการสิ่งที่แตกต่างกันจากมัน ฝั่ง database อยากบอกว่า "unique violation", ฝั่ง service อยากบอกว่า
+"อีเมลนี้ถูกใช้ไปแล้ว", และ HTTP handler ต้องแปลงมันเป็น `409` พร้อม JSON body — โดยไม่ต้อง import `pgconn`
+
+การทำสิ่งนี้ให้ดีต้องมีสามอย่างนอกเหนือจากพื้นฐาน: **error ที่พก data มาด้วย**, กฎว่า
+**การแปลความหมาย (translation) เกิดขึ้นที่ไหน**, และ **boundary** เดียวที่แปลง error เป็น response
+
+## Error ที่พก data มาด้วย
+
+Sentinel error พกแค่ identity ของมัน เมื่อผู้เรียกต้องการ *รายละเอียด* — field ไหนที่ invalid,
+ID ไหนที่หายไป, ต้องรอนานแค่ไหนก่อน retry — ให้กำหนด type ขึ้นมา
+
+struct ใดก็ตามที่มี method `Error() string` ถือเป็น error:
+
+```go showLineNumbers title="internal/order/errors.go"
+package order
+
+type ValidationError struct {
+    Field  string
+    Reason string
+}
+
+func (e *ValidationError) Error() string {
+    return fmt.Sprintf("invalid %s: %s", e.Field, e.Reason)
+}
+
+type NotFoundError struct {
+    Resource string
+    ID       int64
+}
+
+func (e *NotFoundError) Error() string {
+    return fmt.Sprintf("%s %d not found", e.Resource, e.ID)
+}
+```
+
+```go showLineNumbers
+func (s *Service) Place(ctx context.Context, req PlaceRequest) (*Order, error) {
+    if req.Quantity <= 0 {
+        return nil, &ValidationError{Field: "quantity", Reason: "must be positive"}
+    }
+    // ...
+}
+```
+
+<Note title="ใช้ pointer receiver และ return pointer" type="warning">
+  กำหนด `Error()` บน `*ValidationError` และ return `&ValidationError{...}` ถ้าคุณผสมสองแบบเข้าด้วยกัน —
+  method บน value แต่ return เป็น pointer หรือกลับกัน — `errors.As` จะ match ไม่ได้แบบเงียบ ๆ
+  เพราะ `*T` และ `T` เป็นคนละ type กัน เลือกใช้ pointer สำหรับ error type และทำให้สม่ำเสมอ
+</Note>
+
+## `errors.Is` เทียบกับ `errors.As`
+
+ทั้งคู่เดินไล่ chain ของ `%w` แต่ตอบคำถามคนละอย่างกัน:
+
+- **`errors.Is(err, target)`** — "นี่คือ *error ตัวเดียวกัน* หรือเปล่า?" เปรียบเทียบ identity ใช้กับ sentinel
+- **`errors.As(err, &target)`** — "มี error ของ *type นี้* อยู่ใน chain หรือเปล่า?" ถ้ามี มันจะ assign
+  ให้ `target` เพื่อให้คุณอ่าน field ของมันได้
+
+```go showLineNumbers
+// Is: identity. No data to extract.
+if errors.Is(err, sql.ErrNoRows) {
+    return nil, &NotFoundError{Resource: "order", ID: id}
+}
+
+// As: type, plus access to the fields.
+var ve *ValidationError
+if errors.As(err, &ve) {
+    log.Printf("user error on field %s", ve.Field)   // ve is usable here
+}
+```
+
+<Mermaid chart="graph TD
+  S{What do you need<br/>from the error?} -->|Just to know which one it is| I[Sentinel + errors.Is]
+  S -->|Fields: which record, which field, retry after| A[Custom type + errors.As]
+  S -->|Only a message for the user or the log| N[Neither — just wrap and return]" />
+
+การเลือกระหว่างสองรูปแบบ:
+
+| | Sentinel (`var ErrX = errors.New`) | Custom type (`struct`) |
+|---|---|---|
+| พก data ได้ไหม | ไม่ | ได้ |
+| เปรียบเทียบด้วย | `errors.Is` | `errors.As` |
+| ต้นทุน | หนึ่งบรรทัด | หนึ่ง type บวก method |
+| เหมาะกับ | `ErrNotFound`, `ErrOutOfStock` — ชุดคงที่ที่มีจำนวนน้อย | Validation, rate limit, อะไรก็ตามที่มี field หรือ ID |
+
+เริ่มจาก sentinel ก่อน แล้ว promote เป็น type ทันทีที่ผู้เรียกต้อง parse message string เพื่อดึงอะไรบางอย่างออกมา
+— นั่นคือสัญญาณ
+
+## `errors.Join` — เมื่อมีความล้มเหลวมากกว่าหนึ่งอย่าง
+
+บางครั้งมีหลายอย่างผิดพลาดพร้อมกัน และการรายงานแค่อันแรกก็ไม่ค่อยมีประโยชน์ `errors.Join`
+รวมพวกมันเข้าเป็น error เดียวที่ `errors.Is` และ `errors.As` ยังมองทะลุเข้าไปได้:
+
+```go showLineNumbers
+func (r PlaceRequest) Validate() error {
+    var errs []error
+    if r.Quantity <= 0 {
+        errs = append(errs, &ValidationError{Field: "quantity", Reason: "must be positive"})
+    }
+    if r.ProductID == 0 {
+        errs = append(errs, &ValidationError{Field: "product_id", Reason: "is required"})
+    }
+    return errors.Join(errs...)   // nil if errs is empty
+}
+```
+
+`errors.Join(nil, nil)` return `nil` ดังนั้นกรณีที่เป็นค่าว่างจึงไม่ต้องมีการจัดการเป็นพิเศษ มันยังเป็น
+เครื่องมือที่เหมาะสำหรับ cleanup path ที่ทั้ง operation และ rollback อาจล้มเหลวได้ทั้งคู่:
+
+```go showLineNumbers
+if err := doWork(tx); err != nil {
+    return errors.Join(err, tx.Rollback(ctx))
+}
+```
+
+## การแปลความหมาย (translation) เกิดขึ้นที่ไหน
+
+กฎที่ทำให้การจัดการ error ยังมีเหตุผลใน service แบบ layered:
+
+> **แต่ละ layer แปล error จาก layer ด้านล่างให้เป็นภาษาของตัวเอง ทำแค่ครั้งเดียว ที่ boundary**
+
+พูดให้เป็นรูปธรรม สำหรับการ lookup ที่หาไม่เจอ:
+
+<Note title="chain การแปลความหมาย" type="success">
+  1. **Store**: `pgx.ErrNoRows` → `&order.NotFoundError{Resource: "order", ID: id}`
+     type ของ `pgx` หยุดอยู่ตรงนี้ — ไม่มีอะไรที่อยู่เหนือ store ที่รู้ว่า database มีอยู่จริง
+  2. **Service**: ส่งต่อ error ไปเฉย ๆ หรือ wrap มันด้วยสิ่งที่ *มัน* กำลังทำอยู่
+     มันไม่แปลง error ให้เป็น status code
+  3. **Handler**: `errors.As` → `404` พร้อม JSON body ภาษา HTTP เริ่มต้นและจบที่นี่
+</Note>
+
+```go showLineNumbers title="internal/postgres/order_store.go"
+func (s *OrderStore) GetByID(ctx context.Context, id int64) (*order.Order, error) {
+    var o order.Order
+    err := s.pool.QueryRow(ctx,
+        `SELECT id, user_id, quantity, status FROM orders WHERE id = $1`, id,
+    ).Scan(&o.ID, &o.UserID, &o.Quantity, &o.Status)
+
+    if errors.Is(err, pgx.ErrNoRows) {
+        return nil, &order.NotFoundError{Resource: "order", ID: id}
+    }
+    if err != nil {
+        return nil, fmt.Errorf("querying order %d: %w", id, err)
+    }
+    return &o, nil
+}
+```
+
+<Note title="อย่าให้ type ของ infrastructure รั่วขึ้นไปข้างบน" type="danger">
+  ถ้า handler ต้องเช็ค `pgErr.Code == "23505"` แปลว่า layer ของคุณพังทลายแล้ว — package HTTP ตอนนี้
+  ขึ้นกับ database driver และการเปลี่ยน store ก็จะทำ handler พังไปด้วย แปล driver error ที่ store
+  ทุกครั้ง หลักการเดียวกันนี้ใช้กับ error ของ HTTP client ภายใน payments adapter ด้วย
+</Note>
+
+## HTTP boundary
+
+Handler ทุกตัวที่จบด้วย `switch` หกสาขาแบบเดียวกันคือความซ้ำซ้อนที่รอวันแตกต่างกัน เขียน mapping
+แค่ครั้งเดียว แล้วให้ handler เรียกแค่บรรทัดเดียว
+
+```go showLineNumbers title="internal/httpapi/errors.go"
+package httpapi
+
+type errorResponse struct {
+    Error string `json:"error"`
+    Field string `json:"field,omitempty"`
+}
+
+// writeError maps a domain error to a status code and a JSON body.
+// This is the ONLY place in the codebase that does that mapping.
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
+    var (
+        status = http.StatusInternalServerError
+        body   = errorResponse{Error: "internal error"}
+    )
+
+    var ve *order.ValidationError
+    var nf *order.NotFoundError
+
+    switch {
+    case errors.As(err, &ve):
+        status = http.StatusBadRequest
+        body = errorResponse{Error: ve.Reason, Field: ve.Field}
+
+    case errors.As(err, &nf):
+        status = http.StatusNotFound
+        body = errorResponse{Error: nf.Error()}
+
+    case errors.Is(err, order.ErrOutOfStock):
+        status = http.StatusConflict
+        body = errorResponse{Error: "out of stock"}
+
+    case errors.Is(err, context.Canceled):
+        // The client hung up. Nothing to send, and not worth an error log.
+        return
+    }
+
+    if status >= 500 {
+        // Log the full chain internally; never send it to the client.
+        slog.ErrorContext(r.Context(), "request failed",
+            "method", r.Method, "path", r.URL.Path, "err", err)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    _ = json.NewEncoder(w).Encode(body)
+}
+```
+
+```go showLineNumbers title="internal/httpapi/order_handler.go"
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req order.PlaceRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        writeError(w, r, &order.ValidationError{Field: "body", Reason: "malformed JSON"})
+        return
+    }
+
+    o, err := h.svc.Place(r.Context(), req)
+    if err != nil {
+        writeError(w, r, err)      // one line, every handler
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    _ = json.NewEncoder(w).Encode(o)
+}
+```
+
+<Note title="อย่า return wrapped error message กลับไปให้ client" type="danger">
+  `fmt.Fprint(w, err.Error())` บน 500 จะรั่ว internal chain ของคุณ — ชื่อ table, ชิ้นส่วน query,
+  hostname ภายใน — ไปให้ใครก็ตามที่เรียกเข้ามา log error เต็ม ๆ แต่ return message ทั่วไป ค่าเริ่มต้นใน
+  `writeError` ข้างบนคือ `"internal error"` ก็เพราะเหตุผลนี้เป๊ะ ๆ
+</Note>
+
+## Retryable เทียบกับ terminal
+
+ผู้เรียกที่ต้องตัดสินใจว่าจะ retry หรือไม่ ต้องการให้ error บอกเรื่องนี้ การเข้ารหัสไว้ใน type ดีกว่า
+การเทียบกับ message string:
+
+```go showLineNumbers
+type RetryableError struct {
+    Err   error
+    After time.Duration
+}
+
+func (e *RetryableError) Error() string { return e.Err.Error() }
+func (e *RetryableError) Unwrap() error { return e.Err }   // keeps errors.Is/As working through it
+```
+
+```go showLineNumbers
+for attempt := range maxAttempts {
+    err := send(ctx, msg)
+    if err == nil {
+        return nil
+    }
+
+    var re *RetryableError
+    if !errors.As(err, &re) {
+        return err              // terminal: retrying will not help
+    }
+    if attempt == maxAttempts-1 {
+        return err
+    }
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    case <-time.After(re.After):
+    }
+}
+```
+
+<Note title="ทำ Unwrap ให้กับทุก wrapper type" type="warning">
+  custom type ที่ *มี* error ตัวอื่นอยู่ข้างในต้อง expose `Unwrap() error` ออกมา ไม่งั้น chain จะหยุดอยู่
+  ตรงนั้น และ `errors.Is` ที่อยู่เหนือมันจะล้มเหลวหมด `fmt.Errorf` กับ `%w` ทำเรื่องนี้ให้คุณอัตโนมัติ
+  แต่ struct ที่เขียนเองไม่ทำให้
+</Note>
+
+## ตัวอย่างจริง: คำขอออเดอร์หนึ่งรายการ
+
+เส้นทางเต็มของความล้มเหลวหนึ่งครั้ง จาก driver ไปจนถึง client:
+
+```go showLineNumbers title="internal/order/errors.go"
+package order
+
+var ErrOutOfStock = errors.New("out of stock")
+
+type NotFoundError struct {
+    Resource string
+    ID       int64
+}
+
+func (e *NotFoundError) Error() string {
+    return fmt.Sprintf("%s %d not found", e.Resource, e.ID)
+}
+```
+
+```go showLineNumbers title="internal/order/service.go"
+func (s *Service) Place(ctx context.Context, req PlaceRequest) (*Order, error) {
+    if err := req.Validate(); err != nil {
+        return nil, err                      // already a *ValidationError, don't re-wrap
+    }
+
+    product, err := s.products.GetByID(ctx, req.ProductID)
+    if err != nil {
+        // Adds what THIS layer was doing. The NotFoundError underneath survives.
+        return nil, fmt.Errorf("placing order: %w", err)
+    }
+
+    if product.Stock < req.Quantity {
+        return nil, ErrOutOfStock
+    }
+
+    o := &Order{ProductID: req.ProductID, Quantity: req.Quantity}
+    if err := s.store.Create(ctx, o); err != nil {
+        return nil, fmt.Errorf("placing order: %w", err)
+    }
+    return o, nil
+}
+```
+
+สามคำขอ สามผลลัพธ์ ไม่มีโค้ดเพิ่มเติมใน handler:
+
+| คำขอ | Error ที่เกิดขึ้น | สิ่งที่ `writeError` เห็น | สิ่งที่ client ได้รับ |
+|---|---|---|---|
+| `quantity: -1` | `*ValidationError` | `errors.As` match | `400` `{"error":"must be positive","field":"quantity"}` |
+| Product ไม่มีในระบบ | `*NotFoundError`, ถูก wrap โดย service | `errors.As` match ผ่าน wrap เข้าไป | `404` `{"error":"product 99 not found"}` |
+| Database ล่ม | error ของ `pgconn`, ถูก wrap สองชั้น | ไม่มีอะไร match เลย | `500` `{"error":"internal error"}` + log chain เต็ม |
+
+แถวสุดท้ายคือประเด็นของการ wrap: client ไม่เห็นอะไรที่มีประโยชน์เลย แต่บรรทัด log จะอ่านได้ว่า
+`placing order: querying product 99: connection refused` — layer, operation, และสาเหตุ อยู่ใน
+string เดียว
+
+## แนวทางปฏิบัติที่ดี
+
+- **Sentinel สำหรับ identity, type สำหรับ data** promote เป็น type ทันทีที่ผู้เรียกต้องการ field
+- **ใช้ pointer receiver บน error type** และ return pointer ไม่งั้น `errors.As` จะ match ไม่ได้
+- **ทำ `Unwrap() error`** ให้กับทุก error type ที่ wrap error ตัวอื่น
+- **แปลความหมายที่ทุก boundary**: driver error จบที่ store, domain error จบที่ handler
+- **Map error เป็น response ในฟังก์ชันเดียวเท่านั้น** handler เรียกมัน ไม่ใช่ทำ switch เอง
+- **อย่า send wrapped error ไปให้ client เด็ดขาด** log chain แต่ return message ทั่วไปเมื่อเป็น 5xx
+- **อย่า wrap error ที่คุณแค่ส่งผ่านโดยไม่เปลี่ยนอะไร** — การ wrap ควรเพิ่มข้อมูลเข้าไป
+- **Wrap ด้วยชื่อ operation ไม่ใช่คำว่า "error"**: `"placing order: %w"` ไม่ใช่
+  `"error occurred: %w"`
+- **เช็ค `context.Canceled` ที่ boundary** เพื่อไม่ให้การตัดการเชื่อมต่อของ client เต็ม error log ของคุณ
+
+<CardGrid>
+  <Card
+    title="Concurrency →"
+    href="/docs/concurrency"
+    description="Goroutines, channels, select, and the patterns that keep them safe."
+  />
+</CardGrid>

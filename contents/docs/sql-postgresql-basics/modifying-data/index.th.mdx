@@ -1,0 +1,170 @@
+---
+title: การแก้ไขข้อมูล
+description: INSERT, UPDATE, DELETE, upsert ด้วย ON CONFLICT และ RETURNING clause ของ PostgreSQL
+keywords: ["insert", "update", "delete", "upsert", "on conflict", "returning", "truncate", "soft delete"]
+---
+
+## INSERT
+
+```sql showLineNumbers
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice');
+
+-- Multiple rows in one statement — much faster than one INSERT per row
+INSERT INTO users (email, name) VALUES
+    ('bob@example.com', 'Bob'),
+    ('carol@example.com', 'Carol');
+```
+
+ระบุชื่อคอลัมน์เสมอ `INSERT INTO users VALUES (...)` จะพึ่งพาลำดับคอลัมน์ และจะพังทันทีที่มีใครเพิ่มคอลัมน์ใหม่
+
+คอลัมน์ที่คุณไม่ได้ระบุจะได้ค่า `DEFAULT` (หรือ `NULL`) ของมัน ซึ่งเป็นเหตุผลว่าทำไม `id` และ `created_at` ถึงไม่ต้องระบุ
+
+### RETURNING
+
+ฟีเจอร์ของ PostgreSQL ที่ควรรู้ตั้งแต่วันแรก: รับค่ากลับจากการเขียนข้อมูลโดยไม่ต้อง query ครั้งที่สอง
+
+```sql showLineNumbers
+INSERT INTO users (email, name)
+VALUES ('dave@example.com', 'Dave')
+RETURNING id, created_at;
+```
+
+นี่คือวิธีที่คุณจะได้ `id` ที่ถูกสร้างขึ้นมา — ไม่ต้อง `SELECT` ตามหลัง ไม่มี race condition และเดินทางไปกลับแค่ครั้งเดียว ใช้ได้กับ `UPDATE` และ `DELETE` ด้วยเช่นกัน
+
+## UPDATE
+
+```sql showLineNumbers
+UPDATE users SET name = 'Alice Smith' WHERE id = 1;
+
+-- Multiple columns
+UPDATE orders
+SET status = 'shipped', updated_at = now()
+WHERE id = 42;
+
+-- Computed from the current value
+UPDATE orders SET quantity = quantity + 1 WHERE id = 42;
+```
+
+<Note title="UPDATE ที่ไม่มี WHERE จะเขียนทับทุกแถว" type="danger">
+  ```sql
+  UPDATE users SET name = 'test';   -- every user is now named 'test'
+  ```
+
+  ไม่มีการ undo นอกเหนือจากภายใน transaction สองนิสัยที่ช่วยป้องกันเรื่องนี้:
+
+  1. **เขียน `WHERE` clause ก่อน** แล้วค่อยย้อนกลับไปเพิ่ม `SET`
+  2. **`SELECT` ก่อน `UPDATE` เสมอ** — รัน `WHERE` เดียวกันเป็น `SELECT` ก่อนเพื่อดูว่ากำลังจะเปลี่ยนแถวไหนบ้าง
+
+  บน production ให้ห่อคำสั่งที่ทำลายข้อมูลด้วย transaction ที่ชัดเจน เพื่อให้ตรวจสอบจำนวนแถวและ
+  `ROLLBACK` ได้ถ้าผิดพลาด — ดู [Transactions](/docs/sql-postgresql-basics/transactions)
+</Note>
+
+### UPDATE จากตารางอื่น
+
+```sql showLineNumbers
+UPDATE orders o
+SET status = 'cancelled'
+FROM users u
+WHERE o.user_id = u.id AND u.is_active = false;
+```
+
+## DELETE
+
+```sql showLineNumbers
+DELETE FROM orders WHERE id = 42;
+DELETE FROM orders WHERE status = 'cancelled' AND created_at < now() - INTERVAL '1 year';
+
+DELETE FROM orders;        -- deletes every row. Same warning as UPDATE.
+```
+
+`TRUNCATE` ล้างข้อมูลในตารางเร็วกว่า `DELETE` มาก แต่กรองไม่ได้และก่อผลกระทบมากกว่า:
+
+```sql showLineNumbers
+TRUNCATE orders;
+TRUNCATE orders RESTART IDENTITY CASCADE;   -- also resets the id sequence
+```
+
+ใช้ `TRUNCATE` สำหรับรีเซ็ตข้อมูลทดสอบ ใช้ `DELETE` ใน application code
+
+### Soft delete
+
+หลายครั้งคุณไม่อยากให้ข้อมูลหายไปจริงๆ — เพื่อการตรวจสอบย้อนหลัง (audit trail), การกู้คืน หรือ referential integrity:
+
+```sql showLineNumbers
+ALTER TABLE users ADD COLUMN deleted_at TIMESTAMPTZ;
+
+-- "Delete"
+UPDATE users SET deleted_at = now() WHERE id = 1;
+
+-- Every read must then exclude them
+SELECT * FROM users WHERE deleted_at IS NULL;
+```
+
+<Note title="Soft delete เป็นสิ่งที่ต้องแลกกันจริงๆ" type="warning">
+  มันเก็บประวัติไว้ได้ แต่ทุกๆ query ต้องจำเงื่อนไข `WHERE deleted_at IS NULL` — และ query ที่ลืมใส่
+  จะแสดง record ที่ถูกลบไปแล้วให้ผู้ใช้เห็น constraint `UNIQUE` ก็จะไม่ทำงานตามที่คุณคาดหวังด้วย
+  (email ที่ "ถูกลบ" ไปแล้วยังคงบล็อกการลงทะเบียนใหม่) เลือกใช้ soft delete อย่างจงใจ ไม่ใช่ใช้เป็นค่าเริ่มต้น
+  และพิจารณาใช้ view ที่กรองมันออกโดยอัตโนมัติ
+</Note>
+
+## Upsert — INSERT ... ON CONFLICT
+
+"Insert หรือถ้ามีอยู่แล้วก็ update" การทำแบบนี้ด้วย `SELECT` แล้วค่อย `INSERT` คือ race condition ส่วน `ON CONFLICT` เป็น atomic และถูกต้อง
+
+```sql showLineNumbers
+-- Update the existing row on conflict
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice Updated')
+ON CONFLICT (email)
+DO UPDATE SET name = EXCLUDED.name
+RETURNING id;
+
+-- Or just ignore the conflict
+INSERT INTO users (email, name)
+VALUES ('alice@example.com', 'Alice')
+ON CONFLICT (email) DO NOTHING;
+```
+
+`EXCLUDED` หมายถึงแถวที่คุณ *พยายาม* จะ insert ดังนั้น `EXCLUDED.name` คือค่าใหม่ที่ตั้งใจจะใส่ target ของ conflict (`email`) ต้องมี constraint หรือ index แบบ `UNIQUE` อยู่ก่อน
+
+<Mermaid chart="graph TD
+  I[INSERT row] --> C{Conflicts with<br/>a UNIQUE constraint?}
+  C -->|No| N[Row inserted]
+  C -->|Yes| D{ON CONFLICT action}
+  D -->|DO NOTHING| S[Skip silently]
+  D -->|DO UPDATE| U[Update existing row]" />
+
+## Bulk insert
+
+การ insert ทีละแถวในลูปเป็นความผิดพลาดด้าน performance ที่พบบ่อยที่สุดเมื่อเริ่มใช้ฐานข้อมูลใหม่ แต่ละ statement คือการเดินทางไปกลับผ่านเครือข่ายเต็มรูปแบบ:
+
+```sql showLineNumbers
+-- Slow: 1000 round trips
+INSERT INTO orders (user_id, product_id) VALUES (1, 1);
+INSERT INTO orders (user_id, product_id) VALUES (1, 2);
+-- ...
+
+-- Fast: one round trip
+INSERT INTO orders (user_id, product_id) VALUES (1, 1), (1, 2), (1, 3);
+```
+
+สำหรับข้อมูลจำนวนมากๆ (หลักหมื่นแถว) `COPY` ยังเร็วกว่านี้อีก และ pgx ก็เปิดให้ใช้ผ่าน `CopyFrom` — ดู [Using PostgreSQL from Go](/docs/sql-postgresql-basics/using-from-go)
+
+## แนวทางปฏิบัติที่ดี
+
+- **ระบุชื่อคอลัมน์เสมอใน `INSERT`**
+- **เขียน `WHERE` ก่อน `SET`** ใน `UPDATE` และ `SELECT` ก่อนเพื่อยืนยันแถวเป้าหมาย
+- **ใช้ `RETURNING`** เพื่อรับ ID ที่ถูกสร้างขึ้นแทนการ query ตามหลัง
+- **ใช้ `ON CONFLICT` สำหรับ upsert** ห้ามเช็คก่อนแล้วค่อย insert
+- **รวม insert เป็นชุด** แทนการวนลูป insert ทีละแถว
+- **ห่อการเปลี่ยนแปลงที่มีหลาย statement ด้วย transaction** เพื่อให้สำเร็จหรือล้มเหลวไปด้วยกัน
+- **เพิ่ม `updated_at TIMESTAMPTZ`** และตั้งค่าทุกครั้งที่ update — คุณจะต้องใช้มันตอน debug และ sync ข้อมูล
+
+<CardGrid>
+  <Card
+    title="Transactions →"
+    href="/docs/sql-postgresql-basics/transactions"
+    description="ทำให้หลาย statement สำเร็จหรือล้มเหลวไปพร้อมกันเป็นหน่วยเดียว"
+  />
+</CardGrid>

@@ -1,0 +1,177 @@
+---
+title: Join
+description: การรวมแถวข้ามตารางด้วย INNER, LEFT, RIGHT และ FULL join — พร้อมข้อผิดพลาดที่ทำให้ผลลัพธ์ผิดเพี้ยน
+keywords: ["sql join", "inner join", "left join", "outer join", "cross join", "self join", "join condition"]
+---
+
+## join ทำอะไร
+
+join คือการรวมแถวจากสองตารางเข้าด้วยกันตามเงื่อนไข — โดยปกติคือการจับคู่ foreign key กับ primary key มันคือวิธีประกอบข้อมูลที่ถูก normalize แยกออกจากกันกลับเข้ามาด้วยกันอีกครั้ง
+
+ใช้ schema จาก[หน้า introduction](/docs/sql-postgresql-basics/introduction#the-schema-used-throughout-this-section):
+
+```sql showLineNumbers
+SELECT u.name, o.quantity, o.status
+FROM orders o
+JOIN users u ON o.user_id = u.id;
+```
+
+`o` และ `u` คือ table alias — ช่วยให้ query อ่านง่ายขึ้นเมื่อมีมากกว่าหนึ่งตารางเกี่ยวข้อง และจำเป็นต้องใช้เมื่อทั้งสองตารางมีคอลัมน์ชื่อเดียวกัน (เช่น `id`)
+
+## INNER JOIN
+
+คืนเฉพาะแถวที่เงื่อนไขตรงกัน **ทั้งสองฝั่ง** เท่านั้น `JOIN` เฉยๆ หมายถึง `INNER JOIN`
+
+<Mermaid chart="graph TD
+  subgraph INNER
+  A[users] --- M((only matching rows))
+  B[orders] --- M
+  end" />
+
+```sql showLineNumbers
+SELECT u.name, p.name AS product, o.quantity
+FROM orders o
+INNER JOIN users u ON o.user_id = u.id
+INNER JOIN products p ON o.product_id = p.id
+WHERE o.status = 'paid';
+```
+
+user ที่ไม่มี order จะไม่ปรากฏ order ที่ไม่มี user ที่ตรงกันก็จะไม่ปรากฏเช่นกัน (และถ้ามี foreign key อยู่แล้ว มันก็ไม่มีทางเกิดขึ้นตั้งแต่แรก)
+
+## LEFT JOIN
+
+คืน **ทุก** แถวจากตารางซ้าย พร้อมกับแถวที่ตรงกันจากตารางขวา ถ้าไม่มีแถวที่ตรงกัน คอลัมน์ฝั่งขวาจะเป็น `NULL`
+
+นี่คือสิ่งที่คุณต้องการเมื่ออยากได้ "X ทั้งหมด พร้อม Y ของแต่ละอันถ้ามี":
+
+```sql showLineNumbers
+-- Every user, including those who have never ordered
+SELECT u.name, o.id AS order_id
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id;
+```
+
+| name | order_id |
+|---|---|
+| alice | 1 |
+| alice | 2 |
+| bob | *NULL* |
+
+### หาแถวที่ไม่มีคู่ตรงกัน
+
+LEFT JOIN บวก `IS NULL` คือวิธีมาตรฐานในการหา "record ที่ไม่มี record ที่เกี่ยวข้องเลย":
+
+```sql showLineNumbers
+-- Users who have never placed an order
+SELECT u.id, u.name
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE o.id IS NULL;
+```
+
+## RIGHT และ FULL
+
+```sql showLineNumbers
+-- RIGHT JOIN: all rows from the right table. Rare — just flip the tables
+-- and use LEFT JOIN, which is easier to read.
+SELECT u.name, o.id FROM users u RIGHT JOIN orders o ON o.user_id = u.id;
+
+-- FULL OUTER JOIN: all rows from both sides, NULLs where there's no match.
+SELECT u.name, o.id FROM users u FULL JOIN orders o ON o.user_id = u.id;
+```
+
+ในทางปฏิบัติคุณจะเขียนแค่ `INNER` กับ `LEFT` join แทบจะทั้งหมด
+
+## CROSS JOIN
+
+จับคู่ทุกแถวกับทุกแถว — Cartesian product บางครั้งมีประโยชน์สำหรับสร้าง combination แต่ส่วนใหญ่มักเป็นสัญญาณของความผิดพลาด:
+
+```sql showLineNumbers
+SELECT * FROM users CROSS JOIN products;   -- 100 users × 50 products = 5,000 rows
+```
+
+<Note title="ลืมเงื่อนไข join จะกลายเป็น cross join แบบเงียบๆ" type="danger">
+  ลืมส่วน `ON` แล้วคุณจะได้การจับคู่ทุกแบบที่เป็นไปได้ — query ที่คืนข้อมูลนับล้านแถวและดูเหมือนจะค้าง:
+
+  ```sql
+  -- Wrong: no join condition
+  SELECT * FROM orders, users;
+
+  -- Right:
+  SELECT * FROM orders o JOIN users u ON o.user_id = u.id;
+  ```
+
+  เลือกใช้ syntax `JOIN ... ON` แบบชัดเจนแทนรูปแบบเก่าที่คั่นด้วยคอมมา เพราะมันทำให้เงื่อนไขที่ขาดหายไป
+  กลายเป็น syntax error แทนที่จะเป็นหายนะแบบเงียบๆ
+</Note>
+
+## Self join
+
+ตารางที่ join กับตัวเอง โดยใช้ alias สองชื่อที่ต่างกัน — สำหรับโครงสร้างลำดับชั้นและการเปรียบเทียบภายในตารางเดียวกัน:
+
+```sql showLineNumbers
+SELECT e.name AS employee, m.name AS manager
+FROM employees e
+LEFT JOIN employees m ON e.manager_id = m.id;
+```
+
+## WHERE กับ ON ใน outer join
+
+ความแตกต่างนี้ทำให้ผลลัพธ์ผิดพลาดได้จริงๆ และควรทำความเข้าใจให้ถ่องแท้:
+
+```sql showLineNumbers
+-- A: condition in ON — filters which rows are joined.
+-- Every user still appears; only 'paid' orders get attached.
+SELECT u.name, o.id
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'paid';
+
+-- B: condition in WHERE — filters AFTER the join.
+-- Users with no paid order have o.status = NULL, which fails the test,
+-- so they're dropped. This silently behaves like an INNER JOIN.
+SELECT u.name, o.id
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE o.status = 'paid';
+```
+
+<Note title="กฎที่ต้องจำ" type="success">
+  ใน `LEFT JOIN` ให้ใส่เงื่อนไขของ **ตารางฝั่งขวา** ไว้ใน `ON` clause การใส่ไว้ใน `WHERE` จะทำให้พฤติกรรม
+  "left" หายไป ส่วนเงื่อนไขของตารางฝั่ง*ซ้าย* ให้ใส่ไว้ใน `WHERE` ตามปกติ
+</Note>
+
+## Join กับแถวที่ซ้ำกันขึ้นมา
+
+การ join กับความสัมพันธ์แบบ one-to-many จะทำให้แถวฝั่งซ้ายทวีคูณขึ้น:
+
+```sql showLineNumbers
+-- If alice has 3 orders, "alice" appears 3 times
+SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id;
+```
+
+นี่คือพฤติกรรมที่ถูกต้อง แต่มันหมายความว่า **การนับหลัง join อาจนับซ้ำ**:
+
+```sql showLineNumbers
+-- Wrong if a user has multiple orders — counts order rows, not users
+SELECT COUNT(*) FROM users u JOIN orders o ON o.user_id = u.id;
+
+-- Right
+SELECT COUNT(DISTINCT u.id) FROM users u JOIN orders o ON o.user_id = u.id;
+```
+
+## แนวทางปฏิบัติที่ดี
+
+- **ใช้ `JOIN ... ON` แบบชัดเจนเสมอ** ห้ามใช้รูปแบบคั่นด้วยคอมมา
+- **ตั้ง alias ให้ตาราง** ด้วยชื่อสั้นๆ ที่สื่อความหมาย และระบุตารางให้ทุกคอลัมน์ (`u.id` ไม่ใช่ `id` เปล่าๆ)
+- **ทำ index ให้คอลัมน์ที่ใช้ join** — คอลัมน์ foreign key ที่ไม่มี index จะทำให้ join ช้า ([Indexes](/docs/sql-postgresql-basics/indexes))
+- **ใส่เงื่อนไขของตารางฝั่งขวาไว้ใน `ON`** สำหรับ outer join
+- **ระวังการทวีคูณของแถว** เมื่อ join แบบ one-to-many โดยเฉพาะก่อนทำ aggregate
+- **join เฉพาะตารางที่จำเป็นจริงๆ** ทุก join ที่เพิ่มขึ้นคือภาระให้ planner มากขึ้น และมีโอกาสทำให้แถวซ้ำมากขึ้นด้วย
+
+<CardGrid>
+  <Card
+    title="Aggregation & Grouping →"
+    href="/docs/sql-postgresql-basics/aggregation"
+    description="COUNT, SUM, GROUP BY และ HAVING"
+  />
+</CardGrid>

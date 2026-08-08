@@ -1,0 +1,118 @@
+---
+title: พื้นฐาน Git
+description: คำสั่ง Git ที่ใช้ทุกวัน — init, clone, add, commit, status, log, diff — และวิธีเขียน commit message ที่ดี
+keywords: ["git init", "git clone", "git add", "git commit", "git status", "git log", "git diff", "conventional commits"]
+---
+
+นี่คือคำสั่งที่คุณจะพิมพ์วันละหลายสิบครั้ง ทำความคุ้นเคยกับมันก่อนไปต่อที่เรื่อง branching
+
+## เริ่มต้น repository
+
+<Tabs defaultValue="new" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="new">โปรเจกต์ใหม่</TabsTrigger>
+    <TabsTrigger value="existing">โปรเจกต์ที่มีอยู่แล้ว</TabsTrigger>
+  </TabsList>
+  <TabsContent value="new">
+```bash showLineNumbers
+mkdir my-project && cd my-project
+git init
+```
+  </TabsContent>
+  <TabsContent value="existing">
+```bash showLineNumbers
+git clone https://github.com/org/repo.git
+cd repo
+```
+  </TabsContent>
+</Tabs>
+
+`git init` สร้างโฟลเดอร์ `.git` ในไดเรกทอรีปัจจุบัน — โฟลเดอร์นั้นแหละคือตัว repository ส่วน `git clone` ก็ทำแบบเดียวกัน แต่จะดาวน์โหลดประวัติทั้งหมดจาก remote มาด้วย และตั้งค่าให้ชี้ไปที่ remote นั้นให้อัตโนมัติ (ดู [Working with Remotes](/docs/git-workflow/remotes))
+
+## ตรวจสอบสถานะ
+
+```bash showLineNumbers
+git status
+```
+
+รันคำสั่งนี้บ่อยๆ มันบอกคุณว่าไฟล์ไหน untracked, modified หรือ staged — คือบอกตำแหน่งของคุณใน [โมเดลสามพื้นที่](/docs/git-workflow/introduction#gits-three-area-mental-model) ได้ชัดเจน
+
+## Stage การเปลี่ยนแปลง
+
+```bash showLineNumbers
+git add file.go          # stage ไฟล์เดียว
+git add file1.go file2.go # stage หลายไฟล์
+git add .                 # stage ทุกอย่างในไดเรกทอรีปัจจุบัน
+git add -p                # stage เฉพาะบางส่วนของไฟล์แบบ interactive (hunks)
+```
+
+<Note title="Best practice" type="success">
+  ใช้ `git add -p` แทน `git add .` เมื่อไฟล์หนึ่งมีการเปลี่ยนแปลงหลายเรื่องที่ไม่เกี่ยวข้องกัน
+  จะช่วยให้แยกเป็น commit เล็กๆ ที่โฟกัสได้ แทนที่จะรวมกันเป็น commit เดียวที่ทำสามอย่างพร้อมกัน
+</Note>
+
+## Commit
+
+```bash showLineNumbers
+git commit -m "Add rate limiting to auth endpoint"
+```
+
+commit คือ snapshot ถาวรของการเปลี่ยนแปลงที่ stage ไว้ พร้อมข้อความอธิบาย *ทำไม* ถึงเปลี่ยน flag ที่มีประโยชน์:
+
+```bash showLineNumbers
+git commit -am "message"   # stage ไฟล์ที่ tracked และแก้ไขแล้วทั้งหมด แล้ว commit เลย (ข้ามไฟล์ใหม่/untracked)
+git commit --amend         # แก้ไข commit ล่าสุด (message และ/หรือการเปลี่ยนแปลงที่ staged)
+```
+
+<Note title="Danger" type="danger">
+  อย่า `--amend` commit ที่ push ไปแล้วและอาจถูกคนอื่นใช้อยู่ — มันจะเขียนประวัติทับใหม่
+  และทำให้ local branch ของคนอื่นพัง ให้ amend เฉพาะ commit ที่ยังอยู่ใน local เท่านั้น
+</Note>
+
+### เขียน commit message ที่ดี
+
+แนวทางที่นิยมใช้กันคือ **Conventional Commits**: `<type>: <short summary>`
+
+```bash showLineNumbers
+git commit -m "feat: add JWT refresh token endpoint"
+git commit -m "fix: prevent nil pointer on empty request body"
+git commit -m "docs: update README with setup instructions"
+git commit -m "refactor: extract validation logic into helper"
+git commit -m "test: add table-driven tests for parser"
+git commit -m "chore: bump go.mod dependencies"
+```
+
+type ที่พบบ่อย: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf` แนวทางนี้เองที่ทำให้เครื่องมืออย่าง automated changelog และการเพิ่ม semantic version เป็นไปได้ — และยังทำให้คนอ่าน `git log` ได้ง่ายขึ้นเมื่อทุกข้อความเริ่มด้วย intent ที่ชัดเจน
+
+## ดูประวัติ
+
+```bash showLineNumbers
+git log                    # ประวัติทั้งหมด
+git log --oneline          # หนึ่ง commit ต่อหนึ่งบรรทัด
+git log --oneline --graph  # พร้อมภาพ branch/merge
+git log -p                 # แสดง diff จริงของแต่ละ commit
+git log --author="Alice"   # กรองตามผู้ commit
+```
+
+## ดูการเปลี่ยนแปลง (diff)
+
+```bash showLineNumbers
+git diff              # การเปลี่ยนแปลงที่ยังไม่ stage เทียบกับ commit ล่าสุด
+git diff --staged     # การเปลี่ยนแปลงที่ staged เทียบกับ commit ล่าสุด
+git diff HEAD~1 HEAD   # การเปลี่ยนแปลงระหว่างสอง commit
+```
+
+## Best practices
+
+- **Commit บ่อยๆ เป็นชุดเล็กๆ** commit หนึ่งควรแทนการเปลี่ยนแปลงเชิงตรรกะเดียว — รีวิวง่าย ย้อนกลับง่ายถ้าผิดพลาด
+- **เขียน "ทำไม" ไม่ใช่ "อะไร"** diff แสดง *อะไร* ที่เปลี่ยนอยู่แล้ว ข้อความควรอธิบาย *ทำไม* (บริบทที่ diff บอกไม่ได้)
+- **อย่า commit ข้อมูลลับเด็ดขาด** ไฟล์ `.env`, API key, credential — ดู [.gitignore & Git Hooks](/docs/git-workflow/gitignore-hooks) เพื่อป้องกันเรื่องนี้ตั้งแต่ต้น
+- **รัน `git status` ก่อน `git add`** และ `git diff --staged` ก่อน `git commit` — รู้ให้ชัดว่ากำลังจะ commit อะไรบ้าง
+
+<CardGrid>
+  <Card
+    title="Branching & Merging →"
+    href="/docs/git-workflow/branching-merging"
+    description="แยกงานด้วย branch แล้วนำกลับมารวมกัน"
+  />
+</CardGrid>

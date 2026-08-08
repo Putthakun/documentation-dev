@@ -1,0 +1,181 @@
+---
+title: Status Line
+description: การตั้งค่า status bar แบบกำหนดเองใน Claude Code เพื่อแสดงการใช้ context, ค่าใช้จ่าย และสถานะ git
+keywords: ["claude code statusline", "statusLine settings.json", "claude code status bar", "context window usage"]
+---
+
+## มันคืออะไร
+
+Status line คือแถบด้านล่างของ Claude Code โดย default มันแสดง footer hint ที่มีมาให้ในตัวไม่กี่
+อย่าง ชี้ setting `statusLine` ไปที่ script แล้ว Claude Code จะ pipe JSON session data ไปยัง
+script นั้นทาง stdin แทน และพิมพ์อะไรก็ตามที่มัน write ไปยัง stdout — ชื่อ model, ค่าใช้จ่าย, การใช้
+context, git branch หรืออะไรก็ตามที่คุณดึงมาจาก JSON นั้นได้
+
+มันรัน **แบบ local** และไม่เสีย API token คิดว่ามันเป็นสัญชาตญาณแบบ DevOps ที่นำมาใช้กับ tooling
+ของตัวเอง — คุณคงไม่รันบริการโดยไม่มี dashboard และ session ยาว ๆ ของ Claude Code ก็คล้ายกัน —
+คุณอยากเห็น context เต็มก่อนที่จะโดน compact กลางงาน และเห็นค่าใช้จ่ายสะสมก่อนที่มันจะทำให้คุณ
+ประหลาดใจ
+
+Script จะรันใหม่ตอนเริ่ม session, หลังทุกข้อความจาก assistant, หลัง `/compact`, ตอนเปลี่ยน
+permission mode และตอนสลับ vim mode การเปลี่ยนแปลงที่ถี่จะถูก debounce ไว้ 300ms และ script ที่ช้า
+จะถูกยกเลิกถ้ามีการอัปเดตใหม่เกิดขึ้นระหว่างที่มันยังรันอยู่ — ดังนั้นทำให้มันเร็วไว้
+
+## ใช้งานอย่างไร
+
+### ทางลัด: `/statusline`
+
+```text
+/statusline show model name and context percentage with a progress bar
+```
+
+Claude Code จะเขียน script ไปที่ `~/.claude/` และตั้งค่า `settings.json` ให้คุณ นี่คือ default ที่
+ดี — อ่าน section ถัดไปเพื่อเข้าใจว่ามันสร้างอะไรขึ้นมา แล้วค่อยแก้ไขเองจากตรงนั้น
+
+### การตั้งค่าด้วยมือ
+
+เพิ่ม block `statusLine` ใน `~/.claude/settings.json` (หรือ `.claude/settings.json` ของโปรเจกต์):
+
+```json title="settings.json"
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 2
+  }
+}
+```
+
+`command` รันใน shell ดังนั้น path ของ script หรือ one-liner แบบ inline ก็ใช้ได้ทั้งคู่:
+
+```json title="settings.json"
+{
+  "statusLine": {
+    "type": "command",
+    "command": "jq -r '\"[\\(.model.display_name)] \\(.context_window.used_percentage // 0)% context\"'"
+  }
+}
+```
+
+Script ขั้นต่ำสุด โดยใช้ [`jq`](https://jqlang.org/) เพื่อดึง field ออกจาก JSON payload:
+
+```bash showLineNumbers title="~/.claude/statusline.sh"
+#!/bin/bash
+input=$(cat)
+
+MODEL=$(echo "$input" | jq -r '.model.display_name')
+DIR=$(echo "$input" | jq -r '.workspace.current_dir')
+PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+
+echo "[$MODEL] 📁 ${DIR##*/} | ${PCT}% context"
+```
+
+```bash
+chmod +x ~/.claude/statusline.sh
+```
+
+<Note type="warning">
+  fallback `// 0` ใน expression ของ `jq` สำคัญมาก: หลาย field รวมถึง
+  `context_window.used_percentage` เป็น `null` ก่อนที่ API response แรกจะมาถึง และอีกครั้งหลัง
+  `/compact` Script ที่ไม่รองรับ `null` จะพิมพ์บรรทัดว่างหรือพังในไม่กี่วินาทีแรกของทุก session
+</Note>
+
+### ข้อมูลที่คุณได้รับ
+
+Claude Code ส่ง JSON object หนึ่งชิ้นต่อการเรียกใช้หนึ่งครั้ง field ที่สำคัญสำหรับงาน
+backend/DevOps:
+
+| Field | ใช้ทำอะไร |
+|---|---|
+| `model.display_name`, `model.id` | model ไหนกำลังรันอยู่ |
+| `cwd`, `workspace.current_dir` | working directory ปัจจุบัน |
+| `workspace.project_dir` | ตำแหน่งที่ session ถูกเปิดขึ้น ถ้าคุณ `cd` ไปแล้วตั้งแต่นั้น |
+| `workspace.repo.host/owner/name` | parse มาจาก remote `origin` |
+| `cost.total_cost_usd` | ค่าใช้จ่ายโดยประมาณของ session, reset เมื่อ `/clear` |
+| `cost.total_duration_ms`, `cost.total_api_duration_ms` | เวลาจริงเทียบกับเวลาที่รอ API |
+| `cost.total_lines_added`, `cost.total_lines_removed` | ขนาด diff ของ session จนถึงตอนนี้ |
+| `context_window.used_percentage`, `.remaining_percentage` | คำนวณไว้ล่วงหน้า นับเฉพาะ input token |
+| `context_window.context_window_size` | 200k โดย default, 1M สำหรับ extended-context model |
+| `rate_limits.five_hour.used_percentage`, `.seven_day.used_percentage` | limit ของ subscription Pro/Max ไม่มีถ้าใช้ API key |
+| `session_id` | คงที่ต่อ session — ใช้เป็น cache key ได้ ไม่ใช่ PID |
+| `pr.number`, `pr.url`, `pr.review_state` | PR ที่เปิดอยู่ของ branch ปัจจุบัน ถ้ามี |
+| `vim.mode` | มีเฉพาะตอน vim mode เปิดอยู่ |
+
+Git branch และสถานะ **ไม่มี** ใน payload — ตัวอย่างในเอกสารเองก็ shell out ไปเรียก
+`git branch --show-current` และ `git diff --numstat` จากใน script เหมือนที่คุณจะทำ
+
+`used_percentage` คำนวณจาก input token เท่านั้น (`input_tokens + cache_creation_input_tokens
++ cache_read_input_tokens`) มันไม่รวม output token ถ้าคุณคำนวณ context percentage เองจาก
+`context_window.current_usage` ให้ใช้สูตรเดียวกัน ไม่งั้นตัวเลขของคุณจะไม่ตรงกับที่ Claude Code
+แสดงในที่อื่น
+
+## แนวทางที่ดี
+
+- **Cache อะไรก็ตามที่ shell out** `git status` และ `git diff` ถูกครั้งเดียว แต่แพงถ้า script ที่
+  รันใหม่ทุกข้อความเรียกมันหลายสิบครั้งต่อนาที Key cache file ด้วย `session_id` — ไม่ใช่ `$$` หรือ
+  PID ที่เปลี่ยนทุกครั้งที่เรียกและทำให้จุดประสงค์เสียไป
+- **จัดการกรณีที่ field ไม่มี ไม่ใช่แค่ null** `workspace.repo`, `pr`, `rate_limits`, และ `vim`
+  จะ *ไม่ปรากฏเลย* ใน JSON เมื่ออยู่นอก git repo, ไม่มี PR เปิดอยู่, billing แบบ API key, หรือ
+  vim mode ปิด — `// empty` ของ `jq` (ไม่ใช่ `// 0`) คือ idiom สำหรับ "ไม่ต้อง print อะไรถ้าไม่มี"
+- **ทำให้สั้นไว้** Status line ใช้แถวเดียวกับ permission prompt และ notification ของ MCP error
+  ซึ่งอาจตัดบรรทัดยาว ๆ ทิ้งบน terminal ที่แคบ
+- **ตั้ง `refreshInterval` เฉพาะข้อมูลที่ขึ้นกับเวลาเท่านั้น** การอัปเดตแบบ event-driven ครอบคลุม
+  การเปลี่ยน model, ข้อความใหม่, และ compaction เพิ่ม timer เฉพาะถ้าคุณ render นาฬิกา หรือมี
+  background subagent ที่อาจเปลี่ยนสถานะ git ขณะ session หลักว่างอยู่
+- **ทดสอบด้วย fixture ไม่ใช่การเดา** Pipe JSON blob ขั้นต่ำเข้า script โดยตรงก่อนต่อเข้า settings
+  — วิธีนี้จับ typo ของ `jq` ได้ก่อนที่มันจะกลายเป็นแถบว่างเปล่า
+
+## ตัวอย่างจริง
+
+Status line ที่สร้างขึ้นสำหรับงาน backend: model, directory, branch พร้อมสีบอกสถานะ dirty, และ
+context bar ที่เปลี่ยนเป็นสีแดงก่อนที่คุณจะโดน compaction กลางงานแบบไม่ทันตั้งตัว
+
+```bash showLineNumbers title="~/.claude/statusline.sh"
+#!/bin/bash
+input=$(cat)
+
+MODEL=$(echo "$input" | jq -r '.model.display_name')
+DIR=$(echo "$input" | jq -r '.workspace.current_dir')
+PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+COST=$(echo "$input" | jq -r '.cost.total_cost_usd // 0')
+
+GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; RESET='\033[0m'
+
+if [ "$PCT" -ge 90 ]; then BAR_COLOR="$RED"
+elif [ "$PCT" -ge 70 ]; then BAR_COLOR="$YELLOW"
+else BAR_COLOR="$GREEN"; fi
+
+BRANCH=""
+if git rev-parse --git-dir > /dev/null 2>&1; then
+    BRANCH=$(git branch --show-current 2>/dev/null)
+    DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    [ "$DIRTY" -gt 0 ] && BRANCH="${YELLOW}${BRANCH}*${RESET}" || BRANCH="${GREEN}${BRANCH}${RESET}"
+    BRANCH=" | 🌿 $BRANCH"
+fi
+
+COST_FMT=$(printf '$%.2f' "$COST")
+echo -e "[$MODEL] 📁 ${DIR##*/}${BRANCH} | ${BAR_COLOR}${PCT}%${RESET} ctx | ${COST_FMT}"
+```
+
+ต่อเข้ากับ `refreshInterval` เพื่อให้ค่าใช้จ่ายยังคงไต่ขึ้นให้เห็นแม้ background subagent จะกำลัง
+ทำงานอยู่และ session หลักว่างอยู่:
+
+```json title="settings.json"
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "refreshInterval": 5
+  }
+}
+```
+
+ที่ context 90% แถบจะเปลี่ยนเป็นสีแดงก่อนที่ session จะโดน auto-compact — เป็นสัญญาณให้คุณสรุปงาน
+ขั้นตอนปัจจุบันหรือรัน `/compact` ตามจังหวะของตัวเอง แทนที่จะให้มันเกิดขึ้นกลาง edit
+
+<CardGrid>
+  <Card
+    title="Agent Skills →"
+    href="/docs/agent-skills"
+    description="แพ็คคำสั่งที่ทำซ้ำได้ลงใน SKILL.md ที่ Claude ค้นพบและเรียกใช้ได้เอง"
+  />
+</CardGrid>

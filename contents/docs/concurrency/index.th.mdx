@@ -1,0 +1,443 @@
+---
+title: Concurrency
+description: โมเดล concurrency ของ Go และวิธีใช้งานอย่างปลอดภัย
+keywords: ["goroutine", "channel", "select", "worker pool", "sync.Mutex", "race condition", "go scheduler"]
+---
+
+## Goroutines
+
+goroutine คือฟังก์ชันที่ทำงานเป็นอิสระจากฟังก์ชันที่เรียกมันขึ้นมา คุณสร้างมันได้โดยเขียน `go` ไว้หน้าการเรียก:
+
+```go showLineNumbers
+go sendWelcomeEmail(ctx, user)   // returns immediately; the email sends in the background
+```
+
+มันไม่ใช่ OS thread goroutine เริ่มต้นด้วย stack เล็ก ๆ (ไม่กี่กิโลไบต์) ที่โตขึ้นตามความต้องการ
+ดังนั้น server หนึ่งตัวสามารถถือมันได้เป็นแสน ๆ ตัว ในขณะที่ OS thread มีค่าใช้จ่ายระดับเมกะไบต์และไปสูงสุดได้
+แค่หลักพัน ความแตกต่างนี้เองที่ทำให้ Go มอง "หนึ่ง goroutine ต่อหนึ่ง request" เป็นการออกแบบปกติ ไม่ใช่
+เทคนิคเก๋ ๆ — และนี่คือสิ่งที่ `net/http` ทำให้คุณอยู่แล้ว: ทุก request ที่เข้ามาจะถูก serve บน
+goroutine ของตัวเอง โดยที่คุณไม่ต้องเขียน `go` ที่ไหนเลย
+
+<Note title="ไม่มีใคร wait goroutine ให้โดยอัตโนมัติ" type="warning">
+  เมื่อ `main` return โปรแกรมจะจบการทำงาน และ goroutine ที่กำลังรันอยู่ทุกตัวจะตายกลางคัน การเรียก `go`
+  โดยไม่มีอะไร wait มันเลยคือสาเหตุทั่วไปของบั๊กแบบ "อีเมลไม่กี่ฉบับสุดท้ายไม่เคยถูกส่งออกไป" ใช้
+  `WaitGroup`, channel, หรือ `errgroup` — ทั้งหมดพูดถึงข้างล่าง — เพื่อ wait งานที่ต้องเสร็จก่อน
+</Note>
+
+### Scheduler โดยสังเขป
+
+Go จัดการ multiplex goroutine ลงบน OS thread ด้วยตัวเอง มีสามอย่างที่เกี่ยวข้อง: **G** (goroutine),
+**M** (OS thread), และ **P** (scheduling context; มีจำนวน `GOMAXPROCS` ตัว โดยปกติคือหนึ่งตัวต่อหนึ่ง
+CPU core)
+
+สิ่งที่ควรรู้ในทางปฏิบัติ: เมื่อ goroutine ถูก block บน syscall — การอ่าน database, การเขียนไฟล์ —
+scheduler จะปลด thread นั้นออกและมอบ P ให้ goroutine ตัวอื่น ดังนั้นการ block goroutine หนึ่งตัวจึง
+ไม่ทำให้ตัวอื่นหยุดชะงักไปด้วย นี่คือเหตุผลที่โค้ด Go แบบ blocking ธรรมดา ๆ ก็ scale ได้โดยไม่ต้องมี
+keyword `async`/`await` เลยแม้แต่ตัวเดียว
+
+## Channels
+
+channel คือ pipe ที่มี type และยัง **synchronize** goroutine ที่ใช้มันอยู่ด้วย คุณสมบัติข้อที่สองนั้น
+สำคัญกว่า
+
+```go showLineNumbers
+ch := make(chan int)        // unbuffered
+buf := make(chan int, 100)  // buffered, capacity 100
+
+ch <- 42        // send
+v := <-ch       // receive
+close(ch)       // close (senders close, never receivers)
+```
+
+### Unbuffered เทียบกับ buffered
+
+| | Unbuffered `make(chan T)` | Buffered `make(chan T, n)` |
+|---|---|---|
+| Send จะ block จนกว่า | มี receiver พร้อม | มีที่ว่างใน buffer |
+| ให้การรับประกันว่า | ค่านั้นถูกส่งมอบแล้วจริง ๆ | แค่มันถูกใส่คิวแล้ว |
+| ใช้สำหรับ | Synchronization, การส่งต่อ, สัญญาณ "เสร็จแล้ว" | แยก producer เร็ว ออกจาก consumer ที่ช้ากว่า |
+
+การ send แบบ unbuffered คือ *การนัดพบ (rendezvous)*: ทั้งสองฝั่งมาเจอกัน นั่นทำให้มันเป็นเครื่องมือ
+synchronization พอ ๆ กับเครื่องมือส่งข้อมูล ส่วน buffered channel คือคิวที่มีขีดจำกัดตายตัว — และขีดจำกัด
+นี้สำคัญ เพราะมันคือสิ่งที่สร้าง backpressure เมื่อ producer วิ่งเร็วกว่า consumer
+
+<Note title="Buffer ไม่ใช่ทางแก้ปัญหา consumer ที่ช้า" type="warning">
+  การเพิ่ม capacity เมื่อ send ถูก block แค่เลื่อนปัญหาออกไปและซ่อนมันไว้หลังการใช้ memory ที่สูงขึ้น
+  ถ้า producer วิ่งเร็วกว่า consumer อยู่เสมอ คุณต้องการ consumer เพิ่ม, producer ที่ช้าลง, หรือ
+  นโยบายการ drop ที่ตั้งใจไว้ — ไม่ใช่ buffer ที่ใหญ่ขึ้น
+</Note>
+
+### รับข้อมูลจนกว่าจะปิด
+
+```go showLineNumbers
+for v := range ch {       // ends automatically when ch is closed
+    fmt.Println(v)
+}
+
+v, ok := <-ch             // ok is false if the channel is closed and drained
+```
+
+การ close คือการ broadcast: ทุก receiver จะเห็นมัน นั่นทำให้ `close` เป็นวิธีมาตรฐานในการส่งสัญญาณ
+"ไม่มีงานเหลือแล้ว" ให้กลุ่ม worker
+
+<Note title="กฎของ channel ที่ทำให้เกิด panic" type="danger">
+  - **การ send บน channel ที่ปิดแล้วจะ panic** ควรมีแค่ฝั่ง sender เท่านั้นที่ close และ close แค่ครั้งเดียว
+  - **การ close channel ที่ปิดไปแล้วจะ panic** ถ้ามีสอง goroutine ที่อาจจะ close มันได้ นั่นแปลว่าการ
+    ออกแบบมีปัญหา — มอบหน้าที่ให้ตัวใดตัวหนึ่งไปเลย
+  - **การ receive จาก channel ที่ปิดแล้วไม่เป็นไร** และจะ return zero value ทันที
+  - **การ send หรือ receive บน channel ที่เป็น `nil` จะ block ตลอดไป** — สาเหตุคลาสสิกของโปรแกรมค้าง
+    มักมาจาก channel ที่ใครบางคนลืม `make`
+</Note>
+
+## select
+
+`select` รอ operation ของ channel หลายตัวพร้อมกัน และดำเนินการกับตัวที่พร้อมก่อน
+
+```go showLineNumbers
+select {
+case msg := <-messages:
+    handle(msg)
+case <-ctx.Done():
+    return ctx.Err()              // cancelled or timed out
+case <-time.After(5 * time.Second):
+    return errors.New("timed out waiting for a message")
+}
+```
+
+เพิ่ม `default` เพื่อทำให้มันไม่ block — มีประโยชน์สำหรับ "ลอง แต่ไม่ต้องรอ":
+
+```go showLineNumbers
+select {
+case events <- e:
+    // queued
+default:
+    // buffer full: drop it rather than block the caller
+    slog.Warn("event buffer full, dropping", "event", e.Name)
+}
+```
+
+ถ้ามีหลาย case พร้อมกันในเวลาเดียว `select` จะสุ่มเลือกตัวหนึ่ง ซึ่งช่วยป้องกันไม่ให้ channel ที่ยุ่งตัวเดียว
+แย่ง resource จากตัวอื่นจนหิวโหย
+
+## context — สัญญาณหยุดมาตรฐาน
+
+goroutine เกือบทุกตัวใน backend ควร cancel ได้ `context.Context` คือวิธีที่ Go ใช้บอกว่า "หยุด":
+ผู้เรียกทำการ cancel และทุก goroutine ที่ถือ context นั้นจะเห็น `ctx.Done()` ปิดลง
+
+```go showLineNumbers
+func fetchAll(ctx context.Context, ids []int64) error {
+    ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()                       // always; releases the timer
+
+    for _, id := range ids {
+        if err := fetchOne(ctx, id); err != nil {
+            return err                   // the deferred cancel stops any in-flight work
+        }
+    }
+    return nil
+}
+```
+
+ส่ง `ctx` เป็น parameter แรกเสมอ อย่าเก็บมันไว้ใน struct และ `defer cancel()` เสมอ — แม้ว่า timeout
+จะยิงเองอยู่แล้วก็ตาม เพราะไม่งั้น timer จะรั่วไหลอยู่จนกว่ามันจะยิงจริง ๆ
+
+## การรอ goroutine
+
+`sync.WaitGroup` นับงานที่ยังค้างอยู่ ตั้งแต่ **Go 1.25** เป็นต้นมา `wg.Go` จะเริ่ม goroutine และจัดการ
+ตัวนับให้คุณเอง:
+
+```go showLineNumbers
+var wg sync.WaitGroup
+for _, u := range users {
+    wg.Go(func() {
+        sendEmail(ctx, u)     // Go 1.22+ gives each iteration its own u
+    })
+}
+wg.Wait()                     // blocks until all of them return
+```
+
+<Note title="บน Go 1.24 และเก่ากว่า" type="warning">
+  `wg.Go` ยังไม่มี รูปแบบที่เทียบเท่าคือรูปแบบสามส่วนแบบเก่า ซึ่งยังเป็นสิ่งที่คุณจะเห็นใน codebase
+  ส่วนใหญ่:
+
+  ```go
+  var wg sync.WaitGroup
+  for _, u := range users {
+      wg.Add(1)
+      go func() {
+          defer wg.Done()   // deferred, so a panic still decrements
+          sendEmail(ctx, u)
+      }()
+  }
+  wg.Wait()
+  ```
+
+  `wg.Add` ต้องถูกเรียก *ก่อน* เริ่ม goroutine ไม่ใช่ข้างในมัน — ไม่งั้น `Wait` อาจ return ก่อนที่ตัวนับ
+  จะถูกเพิ่มด้วยซ้ำ
+</Note>
+
+## Mutex — เมื่อ channel เป็นเครื่องมือที่ผิด
+
+คำขวัญ "share memory by communicating" เป็นคำแนะนำที่ดีแต่ถูกใช้เกินขอบเขตบ่อยครั้ง เมื่อ goroutine
+หลายตัวต้องอ่านและเขียน shared state ชิ้นเดียวกัน mutex จะเรียบง่ายกว่า เร็วกว่า และอ่านง่ายกว่าการส่ง
+ทุก access ผ่าน channel
+
+```go showLineNumbers
+type Counter struct {
+    mu     sync.Mutex
+    counts map[string]int
+}
+
+func (c *Counter) Inc(key string) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    c.counts[key]++
+}
+
+func (c *Counter) Get(key string) int {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    return c.counts[key]
+}
+```
+
+ใช้ `sync.RWMutex` เมื่อการอ่านมีจำนวนมากกว่าการเขียนอย่างชัดเจน — ผู้ถือ `RLock` หลายคนสามารถทำงาน
+พร้อมกันได้ ในขณะที่ `Lock` จะ exclusive ([Map ไม่ปลอดภัยสำหรับการใช้งานพร้อมกันหลายตัว](/docs/golang-fundamentals/collections)
+ถ้าไม่มีสองอย่างนี้อย่างใดอย่างหนึ่ง)
+
+กฎคร่าว ๆ: **channel สำหรับส่งต่อ ownership ของ data ระหว่าง goroutine, mutex สำหรับปกป้อง state ที่อยู่กับที่**
+
+<Note title="อย่า copy struct ที่มี mutex อยู่ข้างใน" type="danger">
+  การ copy `sync.Mutex` จะ copy สถานะ lock ของมันไปด้วย และตัวที่ copy มาจะไม่ได้ปกป้องอะไรเลย ใช้
+  pointer receiver เสมอกับ type ที่มี mutex field และส่งมันเป็น `*Counter` `go vet` จับเรื่องนี้ได้ —
+  เป็นหนึ่งใน check ที่ทำให้การรัน `go vet` ใน CI คุ้มค่า
+</Note>
+
+## Worker pool: fan-out, fan-in
+
+การเรียก `go` แบบไม่มีขอบเขตบนชุด input ขนาดใหญ่จะทำให้ connection, memory, หรือ rate limit หมด
+worker pool จำกัดขอบเขตของ concurrency: N goroutine อ่านจาก jobs channel เดียวและเขียนไปยัง results
+channel เดียว
+
+<Mermaid chart="graph LR
+  P[producer<br/>fills jobs channel] --> J[(jobs chan)]
+  J --> W1[worker 1]
+  J --> W2[worker 2]
+  J --> W3[worker 3]
+  W1 --> R[(results chan)]
+  W2 --> R
+  W3 --> R
+  R --> C[collector]" />
+
+```go showLineNumbers
+func process(ctx context.Context, ids []int64, workers int) []Result {
+    jobs := make(chan int64)
+    results := make(chan Result)
+
+    // Fan out: N workers share one jobs channel.
+    var wg sync.WaitGroup
+    for range workers {
+        wg.Go(func() {
+            for id := range jobs {          // ends when jobs is closed
+                results <- fetch(ctx, id)
+            }
+        })
+    }
+
+    // Feed the workers, then close so they can finish.
+    go func() {
+        defer close(jobs)
+        for _, id := range ids {
+            select {
+            case jobs <- id:
+            case <-ctx.Done():
+                return
+            }
+        }
+    }()
+
+    // Close results once every worker has returned.
+    go func() {
+        wg.Wait()
+        close(results)
+    }()
+
+    // Fan in: collect until results is closed.
+    var out []Result
+    for r := range results {
+        out = append(out, r)
+    }
+    return out
+}
+```
+
+goroutine ตัวช่วยสองตัวคือส่วนที่ควรศึกษาให้ดี ตัวหนึ่ง close `jobs` เพื่อให้ `for range` ในแต่ละ worker
+จบการทำงาน อีกตัว wait ให้ worker ทุกตัวเสร็จก่อนที่จะ close `results` เพื่อให้ collector จบการทำงาน
+ถ้าไม่มีการ close เหล่านี้ ฟังก์ชันจะค้างตลอดไป
+
+## errgroup — เวอร์ชันที่คุณจะเขียนใช้จริง
+
+`golang.org/x/sync/errgroup` (module ภายนอก ไม่ใช่ standard library) ห่อรูปแบบนั้นไว้: มัน wait
+เหมือน `WaitGroup`, ส่งต่อ error ตัวแรก, และ cancel shared context เพื่อให้ที่เหลือหยุดเร็วขึ้น
+
+```bash showLineNumbers
+go get golang.org/x/sync/errgroup
+```
+
+```go showLineNumbers
+func fetchAll(ctx context.Context, ids []int64) ([]Result, error) {
+    g, ctx := errgroup.WithContext(ctx)
+    g.SetLimit(10)                        // at most 10 in flight
+
+    results := make([]Result, len(ids))
+    for i, id := range ids {
+        g.Go(func() error {
+            r, err := fetch(ctx, id)      // ctx is cancelled if any sibling fails
+            if err != nil {
+                return fmt.Errorf("fetching %d: %w", id, err)
+            }
+            results[i] = r                // safe: each goroutine owns its own index
+            return nil
+        })
+    }
+
+    if err := g.Wait(); err != nil {
+        return nil, err                   // the first error, with the rest cancelled
+    }
+    return results, nil
+}
+```
+
+การเขียนลง `results[i]` จากหลาย goroutine ไม่ต้องใช้ lock เลย เพราะแต่ละตัวแตะ index คนละตัวกัน —
+header ของ slice ไม่ถูกแก้ไขเลย นี่คือวิธีมาตรฐานในการรวบรวมผลลัพธ์ที่มีลำดับโดยไม่ต้องใช้ channel
+
+## Goroutine รั่ว
+
+goroutine ที่รั่วคือตัวที่ถูก block ตลอดไปบน channel ที่ไม่มีใครจะใช้อีกแล้ว มันไม่เคยถูกเก็บกวาด (garbage
+collected) และมันยังถือทุกอย่างที่มัน reference อยู่ รูปแบบทั่วไปสองแบบ:
+
+```go showLineNumbers
+// Leak 1: the receiver gave up, the sender blocks forever.
+func leaky(ctx context.Context) (int, error) {
+    ch := make(chan int)          // unbuffered, and nothing will ever receive
+    go func() {
+        ch <- expensive()         // blocks here for the life of the process
+    }()
+
+    select {
+    case v := <-ch:
+        return v, nil
+    case <-ctx.Done():
+        return 0, ctx.Err()       // we return, and the goroutine above is stranded
+    }
+}
+
+// Fix: give the channel a slot so the send always completes.
+ch := make(chan int, 1)
+```
+
+```go showLineNumbers
+// Leak 2: no way to stop it.
+go func() {
+    for {
+        poll()
+        time.Sleep(time.Second)   // no ctx, no exit condition — runs until the process dies
+    }
+}()
+
+// Fix: make it cancellable.
+go func() {
+    ticker := time.NewTicker(time.Second)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            poll()
+        }
+    }
+}()
+```
+
+<Note title="ทุก goroutine ต้องมีทางออกที่ชัดเจน" type="success">
+  ก่อนเขียน `go` ตอบคำถามหนึ่งข้อ: *อะไรจะทำให้มัน return?* channel ที่ถูก close, context ที่ถูก cancel,
+  หรือ loop ที่มีจำนวนรอบจำกัด ถ้าคำตอบคือ "ไม่มีอะไร" แสดงว่าคุณเขียน leak ขึ้นมาแล้ว ใน production
+  การเห็น `runtime.NumGoroutine()` ค่อย ๆ ไต่ขึ้นช้า ๆ คืออาการที่ต้องจับตาดู
+</Note>
+
+## การตรวจจับ race
+
+Data race — สอง goroutine แตะ memory ตำแหน่งเดียวกัน โดยอย่างน้อยตัวหนึ่งเขียน — คือ undefined
+behavior และมักปรากฏเป็นข้อมูลเสียหายนานก่อนที่มันจะแสดงเป็น crash Go มี detector มาให้ในตัว:
+
+```bash showLineNumbers
+go test -race ./...        # in CI, always
+go run -race ./cmd/api     # locally, when debugging
+go build -race             # a binary that reports races at runtime
+```
+
+มันรายงานเฉพาะ race ที่มันสังเกตเห็นจริง ๆ ดังนั้นคุณภาพของมันขึ้นอยู่กับ test coverage ของ concurrent
+path ของคุณเอง — แต่มัน false positive แทบไม่มีเลย อะไรก็ตามที่มันรายงานคือบั๊กจริง
+
+<Note title="รัน -race ใน CI" type="success">
+  มันใช้ CPU มากขึ้นราว 5-10 เท่าและใช้ memory มากขึ้น จึงไม่เหมาะกับ production build — แต่กับ test
+  suite แล้วมันคือประกันราคาถูก race ที่พบใน CI ใช้เวลาแค่ไม่กี่นาที ส่วน race เดียวกันที่พบใน production
+  จะกินเวลาหนึ่งวันเต็มกับการ debug ที่งุนงงกับข้อมูลที่ "ไม่ควรผิด"
+</Note>
+
+## ตัวอย่างจริง: การเสริมข้อมูลออเดอร์
+
+ดึงรายละเอียดสำหรับชุดออเดอร์จาก upstream ที่มี rate limit โดยมีขอบเขต, cancel ได้, และล้มเหลวเร็ว:
+
+```go showLineNumbers title="internal/order/enrich.go"
+package order
+
+// Enrich fetches shipping details for every order, at most 8 at a time.
+// It returns the first error and cancels the rest.
+func (s *Service) Enrich(ctx context.Context, orders []*Order) error {
+    ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+
+    g, ctx := errgroup.WithContext(ctx)
+    g.SetLimit(8)                        // the upstream allows 10/s — stay under it
+
+    for _, o := range orders {
+        g.Go(func() error {
+            details, err := s.shipping.Lookup(ctx, o.TrackingID)
+            if err != nil {
+                return fmt.Errorf("looking up tracking %s: %w", o.TrackingID, err)
+            }
+            o.Shipping = details         // each goroutine writes its own order
+            return nil
+        })
+    }
+    return g.Wait()
+}
+```
+
+สี่คุณสมบัติที่ควรกล่าวถึง: concurrency ถูกจำกัดด้วย `SetLimit`, operation ทั้งหมดมี deadline,
+ความล้มเหลวหนึ่งครั้ง cancel ตัวอื่นผ่าน `ctx` ที่แชร์กัน และไม่มี shared mutable state เลย — เลยไม่มี
+mutex และไม่มีอะไรให้ `-race` เจอ
+
+## แนวทางปฏิบัติที่ดี
+
+- **รู้ว่าอะไรทำให้ goroutine แต่ละตัว return** ก่อนที่คุณจะเริ่มมัน
+- **ส่ง `context.Context` ไปทุกที่** และ `defer cancel()` ทุกครั้งที่ใช้ `WithTimeout`/`WithCancel`
+- **จำกัดขอบเขต concurrency ของคุณ** ใช้ `errgroup.SetLimit` หรือ worker pool อย่าใช้ `go` ใน loop
+  แบบไม่มีขอบเขต
+- **ฝั่ง sender เป็นคน close channel** ไม่ใช่ receiver และมีแค่ goroutine เดียวเท่านั้นที่ทำ
+- **Channel ย้ายข้อมูลระหว่าง goroutine; mutex ปกป้อง state ที่อยู่กับที่**
+- **อย่า copy struct ที่มี mutex** — ใช้ pointer receiver และให้ `go vet` ช่วยตรวจสอบ
+- **เลือก `errgroup` มากกว่า `WaitGroup` + error channel ที่เขียนเอง** มันคือสิ่งเดียวกันแต่ถูกต้องกว่า
+- **รัน `go test -race` ใน CI**
+- **อย่าใช้ concurrency เป็นค่าเริ่มต้น** loop แบบ sequential ที่ใช้เวลา 40 ms ดีกว่า loop แบบ concurrent
+  ที่ใช้เวลา 30 ms แต่มี race อยู่ข้างใน เพิ่ม concurrency เมื่อการวัดผลบอกว่าจำเป็นเท่านั้น
+
+<CardGrid>
+  <Card
+    title="Testing →"
+    href="/docs/testing"
+    description="Table-driven tests, fakes, coverage, and integration tests against a real database."
+  />
+</CardGrid>

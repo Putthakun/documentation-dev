@@ -1,0 +1,201 @@
+---
+title: "Error: พื้นฐาน"
+description: ทำไม Go ถึง return error แทนที่จะ throw มัน, idiom if err != nil และเมื่อไหร่ที่ควรใช้ panic
+keywords: ["golang error", "if err != nil", "errors.New", "fmt.Errorf", "panic", "recover"]
+---
+
+## Error คือ value
+
+Go ไม่มี exception Function ที่อาจล้มเหลวจะ return `error` เป็นค่าที่ return ตัวสุดท้าย และผู้เรียกใช้เช็คมัน นั่นคือทั้งหมดของโมเดลนี้
+
+```go showLineNumbers
+f, err := os.Open("config.yaml")
+if err != nil {
+    return err
+}
+defer f.Close()
+```
+
+`error` ก็แค่ interface ที่มี method เดียว:
+
+```go showLineNumbers
+type error interface {
+    Error() string
+}
+```
+
+อะไรก็ตามที่มี method `Error() string` ถือเป็น error `nil` หมายถึงสำเร็จ
+
+<Note title="ทำไมถึงไม่มี exception?" type="success">
+  เพราะ error เป็น value ธรรมดา มันจึงมองเห็นได้ใน function signature ไม่สามารถเพิกเฉยโดยไม่ตั้งใจได้
+  และไม่มี control flow ที่มองไม่เห็นกระโดดขึ้นไปบน stack ต้นทุนคือความยืดยาว — คุณจะเขียน
+  `if err != nil` บ่อยมาก ข้อแลกเปลี่ยนนี้เป็นความตั้งใจ: เมื่ออ่านโค้ด Go คุณจะสามารถ
+  เห็นได้เสมอว่าจะเกิดอะไรขึ้นเมื่อบางอย่างล้มเหลว
+</Note>
+
+## การสร้าง error
+
+```go showLineNumbers
+// Simple, static message
+errors.New("user not found")
+
+// With formatting
+fmt.Errorf("invalid port %d", port)
+
+// Wrapping another error with %w — preserves the original for inspection
+fmt.Errorf("loading config: %w", err)
+```
+
+ใช้ `%w` (ไม่ใช่ `%v`) เมื่อจะรวม error ที่อยู่ข้างใต้เข้าไปด้วย เพื่อให้ผู้เรียกใช้ยังตรวจสอบมันได้ด้วย `errors.Is` / `errors.As`
+
+## Idiom
+
+เช็คทันที จัดการ และ return ออกไปโดยเร็ว:
+
+```go showLineNumbers
+func LoadUser(ctx context.Context, id string) (*User, error) {
+    var u User
+    // QueryRow returns a Row, not an error — the error surfaces on Scan.
+    err := db.QueryRow(ctx, `SELECT id, email, name FROM users WHERE id = $1`, id).
+        Scan(&u.ID, &u.Email, &u.Name)
+    if err != nil {
+        return nil, fmt.Errorf("querying user %s: %w", id, err)
+    }
+
+    prefs, err := loadPreferences(ctx, u.ID)
+    if err != nil {
+        return nil, fmt.Errorf("loading preferences for %s: %w", id, err)
+    }
+    u.Preferences = prefs
+
+    return &u, nil
+}
+```
+
+นี่คือรูปแบบที่โค้ด Go ทุกตัวมี: คอลัมน์ของ block `if err != nil` สั้น ๆ ที่มี happy path วิ่งตรงลงไปทางขอบซ้าย
+
+### เพิ่ม context ขณะที่มันเดินทางขึ้นไป
+
+แต่ละ layer จะห่อด้วยสิ่งที่*ตัวมันเอง*กำลังทำอยู่ ข้อความสุดท้ายจะอ่านเหมือน trace:
+
+```text
+handling POST /users: creating user: querying user u_123: connection refused
+```
+
+หากไม่มีการ wrap คุณจะได้แค่ `connection refused` โดยไม่รู้เลยว่ามันมาจากไหน
+
+<Note title="อย่า log แล้ว return" type="warning">
+  เลือกอย่างใดอย่างหนึ่ง ถ้าคุณ log error *และ* return มันด้วย ผู้เรียกใช้จะ log มันอีก แล้วคุณ
+  จะได้ failure เดียวกันถูกบันทึกซ้ำถึงสามครั้งใน สามชั้น Convention คือ: **return** error พร้อม
+  เพิ่ม context ขึ้นไปเรื่อย ๆ และ **log แค่ครั้งเดียว** ที่ชั้นบนสุด (HTTP handler หรือ `main`)
+</Note>
+
+## อย่าเพิกเฉยต่อ error แบบเงียบ ๆ
+
+```go showLineNumbers
+// Bad — the error vanishes
+result, _ := doSomething()
+
+// Fine — deliberate, with a reason
+// Close() on a read-only file can't fail in a way we can act on.
+defer f.Close()
+
+// Good
+result, err := doSomething()
+if err != nil {
+    return fmt.Errorf("doing something: %w", err)
+}
+```
+
+ถ้าคุณตั้งใจจะทิ้ง error จริง ๆ ให้เขียน comment บอกเหตุผล ไม่อย่างนั้น linter อย่าง `errcheck` จะ flag มันให้ — อย่างถูกต้องด้วย
+
+## Sentinel errors
+
+Package-level error value ที่ผู้เรียกใช้เปรียบเทียบกับมันได้:
+
+```go showLineNumbers
+var ErrNotFound = errors.New("not found")
+
+func GetUser(id string) (*User, error) {
+    if !exists(id) {
+        return nil, ErrNotFound
+    }
+    // ...
+}
+
+// Caller:
+u, err := GetUser(id)
+if errors.Is(err, ErrNotFound) {
+    w.WriteHeader(http.StatusNotFound)
+    return
+}
+```
+
+`errors.Is` unwrap chain ของ `%w` ได้ ดังนั้นมันยังคง match ได้แม้ error จะถูก wrap ไปหลายชั้นแล้ว Standard library ใช้ pattern นี้: `sql.ErrNoRows`, `io.EOF`, `os.ErrNotExist`
+
+## panic และ recover
+
+`panic` จะ unwind stack และทำให้โปรแกรม crash มัน **ไม่ใช่** exception mechanism ของ Go และคุณแทบไม่ควรเรียกมันเลย
+
+```go showLineNumbers
+panic("this kills the program")
+```
+
+การใช้งานที่ถูกต้องมีขอบเขตแคบ:
+
+- **ความล้มเหลวตอน startup ที่แก้ไขไม่ได้จริง ๆ** — env var ที่จำเป็นแต่ขาดหายไปใน `main()`, embedded template ที่รูปแบบผิด การ crash เสียงดังตอน boot คือสิ่งที่ถูกต้อง
+- **ข้อผิดพลาดของ programmer ที่ไม่ควรเกิดขึ้นได้** — `regexp.MustCompile` panic เพราะ regex ที่เขียนผิดแบบ hardcode คือ bug ไม่ใช่เงื่อนไขตอน runtime
+
+```go showLineNumbers
+// Fine: fails at startup if the developer wrote a bad pattern
+var emailRe = regexp.MustCompile(`^[^@]+@[^@]+$`)
+
+func main() {
+    dsn := os.Getenv("DATABASE_URL")
+    if dsn == "" {
+        log.Fatal("DATABASE_URL is required")   // log.Fatal, not panic
+    }
+}
+```
+
+`recover` หยุด panic และใช้ได้เฉพาะที่ boundary ที่คุณไม่อยากให้ request แย่ ๆ ตัวเดียวทำให้ล้มทั้งระบบ — ที่พบบ่อยที่สุดคือ HTTP middleware:
+
+```go showLineNumbers title="middleware.go"
+func recoverPanic(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        defer func() {
+            if err := recover(); err != nil {
+                log.Printf("panic: %v\n%s", err, debug.Stack())
+                http.Error(w, "internal server error", http.StatusInternalServerError)
+            }
+        }()
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+<Note title="panic ไม่ใช่ error handling" type="danger">
+  อย่าใช้ `panic` สำหรับความล้มเหลวที่คาดการณ์ได้ — user ที่หาไม่เจอ, input ที่ไม่ถูกต้อง, timeout
+  สิ่งเหล่านั้นเป็นเงื่อนไขปกติและควรอยู่ใน `error` ที่ return ออกไป panic ในโค้ดที่จัดการ request
+  จะทำให้ทั้ง server ล้มลง เว้นแต่จะมีอะไรมา recover มัน
+</Note>
+
+## แนวทางปฏิบัติที่ดี
+
+- **เช็คทุก error** ทิ้งมันได้เฉพาะเมื่อตั้งใจ และต้องมี comment
+- **Wrap ด้วย `%w` และเพิ่ม context** อธิบายว่าคุณกำลังพยายามทำอะไรอยู่
+- **Return error ขึ้นไปเรื่อย ๆ; log แค่ครั้งเดียวที่ชั้นบนสุด**
+- **ใช้ `errors.Is` สำหรับการเปรียบเทียบ** อย่าใช้ `err == ErrFoo` (มันจะพังทันทีที่มีอะไรมา wrap มัน)
+- **อย่าใส่คำว่า "error" หรือ "failed" ในข้อความ** — `fmt.Errorf("error opening file: %w", err)` จะอ่านเป็น "error: error opening file: ..." แค่บอกว่าคุณกำลังทำอะไรอยู่ก็พอ: `"opening config: %w"`
+- **ตัวพิมพ์เล็กและไม่มีเครื่องหมายวรรคตอนท้าย** ใน error string เพราะมันจะถูกต่อกันเข้าเป็นข้อความที่ยาวขึ้น
+- **สงวน `panic` ไว้สำหรับ state ที่เป็นไปไม่ได้เท่านั้น**; ใช้ `log.Fatal` สำหรับความล้มเหลวตอน startup
+
+Custom error types, `errors.As`, การจัดการ error แบบมีโครงสร้างใน HTTP API และ pattern ที่ลึกกว่านี้จะพูดถึงใน [Error Handling](/docs/error-handling)
+
+<CardGrid>
+  <Card
+    title="← กลับไปที่ Golang Fundamentals"
+    href="/docs/golang-fundamentals"
+    description="กระโดดไปยังหัวข้อใดก็ได้ในส่วนนี้"
+  />
+</CardGrid>

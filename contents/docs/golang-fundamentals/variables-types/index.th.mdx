@@ -1,0 +1,164 @@
+---
+title: ตัวแปร ชนิดข้อมูล และค่าคงที่
+description: การประกาศตัวแปร, zero value ของ Go, การแปลงชนิดข้อมูล และ constants กับ iota
+keywords: ["golang variables", "zero value", "type conversion", "constants", "iota", "short declaration"]
+---
+
+## การประกาศตัวแปร
+
+Go มีรูปแบบสองแบบ ภายใน function รูปแบบสั้นเป็นแบบ idiomatic:
+
+```go showLineNumbers
+// Short declaration — type inferred. Only valid inside functions.
+name := "alice"
+count := 42
+
+// Full form — required at package level, or when you want an explicit type
+// or the zero value.
+var name string = "alice"
+var count int
+var ready bool
+```
+
+ใช้ `:=` เป็นค่าเริ่มต้น เลือกใช้ `var` เมื่อคุณต้องการ zero value โดยเฉพาะ (`var buf bytes.Buffer`) หรือเมื่อประกาศที่ package scope
+
+<Note title="ตัวแปรที่ไม่ได้ใช้คือ compile error" type="warning">
+  Go จะปฏิเสธการคอมไพล์ถ้าคุณประกาศตัวแปร local แล้วไม่เคยใช้มัน เช่นเดียวกันกับ import ที่ไม่ได้ใช้
+  นี่คือความตั้งใจ — มันป้องกันไม่ให้ dead code สะสมขึ้นเรื่อย ๆ — แต่มันมักทำให้คนที่มาจากภาษาอื่น
+  แปลกใจเสมอ ใช้ `_` เพื่อทิ้งค่าที่คุณไม่ต้องการอย่างชัดเจน
+</Note>
+
+## Zero values
+
+ทุก type มี zero value ของตัวเอง และตัวแปรจะ **ไม่มีวัน** เป็น garbage ที่ไม่ได้ initialize นี่คือ safety feature จริง ๆ — ไม่มี "undefined" ใน Go
+
+| Type | Zero value |
+|---|---|
+| `int`, `int64`, `float64` | `0` |
+| `string` | `""` (ว่างเปล่า ไม่ใช่ `nil`) |
+| `bool` | `false` |
+| Pointers, slices, maps, channels, functions, interfaces | `nil` |
+| `struct` | struct ที่ทุก field ถูกตั้งเป็น zero value ของตัวเอง |
+
+```go showLineNumbers
+var count int      // 0
+var name string    // ""
+var items []string // nil — but you can still call len() and append() on it
+
+fmt.Println(len(items)) // 0, no panic
+items = append(items, "first") // works fine on a nil slice
+```
+
+<Note title="ออกแบบให้รองรับ zero value" type="success">
+  Go type ที่ออกแบบมาดีจะใช้งานได้โดยไม่ต้อง initialize ใด ๆ `var mu sync.Mutex` และ
+  `var buf bytes.Buffer` พร้อมใช้งานได้ทันที เมื่อคุณเขียน struct ของตัวเอง พยายามทำให้
+  zero value มีความหมาย แทนที่จะต้องพึ่ง constructor เสมอ
+</Note>
+
+## Basic types
+
+```go showLineNumbers
+// Integers — int is 64-bit on modern platforms. Use int unless you have a
+// specific reason (binary formats, memory pressure, matching an API).
+var i int
+var i8 int8; var i64 int64
+var u uint; var u8 uint8   // byte is an alias for uint8
+
+// Floats — use float64 unless you have a reason not to.
+var f float64
+
+// Strings are immutable UTF-8 byte sequences.
+var s string
+
+// rune is an alias for int32 and represents one Unicode code point.
+var r rune = 'A'
+```
+
+## การแปลงชนิดข้อมูลต้องทำอย่างชัดเจนเสมอ
+
+Go จะไม่มีวันแปลงระหว่าง numeric type ให้อัตโนมัติ ซึ่งเยิ่นเย้อก็จริง แต่มันตัด bug ประเภทความแม่นยำที่เกิดขึ้นแบบเงียบ ๆ ออกไปได้ทั้งหมด
+
+```go showLineNumbers
+var i int = 42
+var f float64 = float64(i)   // required — `var f float64 = i` will not compile
+var u uint = uint(f)
+
+// Same for strings and byte slices:
+b := []byte("hello")
+s := string(b)
+```
+
+<Note title="string(int) ไม่ได้ทำงานอย่างที่คุณคิด" type="danger">
+  `string(65)` จะได้ผลลัพธ์เป็น `"A"` (ตัวอักษรที่มี code point เท่ากับ 65) ไม่ใช่ `"65"` หากต้องการแปลงตัวเลข
+  เป็นข้อความในระบบทศนิยม ให้ใช้ `strconv.Itoa(65)` หรือ `fmt.Sprintf("%d", 65)` Go เวอร์ชันใหม่ ๆ จะเตือน
+  เรื่องนี้ผ่าน `go vet` แต่ก็ยังทำให้หลายคนพลาดอยู่ดี
+</Note>
+
+## Constants
+
+Constant จะถูกคำนวณตอน compile time และสามารถเป็น untyped ได้ ทำให้มันปรับตัวเข้ากับ context ได้:
+
+```go showLineNumbers
+const MaxRetries = 3
+const AppName = "payments-api"
+
+// Untyped constants take on the type they're used with:
+const timeout = 30
+var d time.Duration = timeout * time.Second  // works — timeout adapts
+
+// Grouped:
+const (
+    StatusActive   = "active"
+    StatusInactive = "inactive"
+)
+```
+
+## iota — enumerations
+
+`iota` เป็นตัวนับที่จะรีเซ็ตเป็น 0 ใน `const` block แต่ละอัน และเพิ่มขึ้นทีละบรรทัด นี่คือวิธีที่ Go ทำ enum:
+
+```go showLineNumbers
+type Status int
+
+const (
+    StatusPending Status = iota // 0
+    StatusActive                // 1
+    StatusSuspended             // 2
+    StatusClosed                // 3
+)
+
+// Give it a String() method so it prints readably instead of as a number:
+func (s Status) String() string {
+    switch s {
+    case StatusPending:
+        return "pending"
+    case StatusActive:
+        return "active"
+    case StatusSuspended:
+        return "suspended"
+    case StatusClosed:
+        return "closed"
+    default:
+        return "unknown"
+    }
+}
+```
+
+การประกาศ `type Status int` แทนที่จะใช้ `int` เฉย ๆ หมายความว่า compiler จะหยุดคุณไม่ให้ส่งตัวเลขที่ไม่เกี่ยวข้องเข้าไปในที่ที่ต้องการ `Status` — เป็น type safety ราคาถูกที่ได้มาฟรี ๆ
+
+## แนวทางปฏิบัติที่ดี
+
+- **เลือก `:=` ภายใน function** ใช้ `var` สำหรับ zero value และการประกาศระดับ package
+- **ใช้ `int` สำหรับการนับและ index** เว้นแต่จะมีเหตุผลที่ต้องการขนาดที่เจาะจง
+- **ใช้ `float64` ไม่ใช่ `float32`** เว้นแต่คุณกำลังต้องแมทช์กับ format ภายนอก
+- **อย่าใช้ float สำหรับเงินเด็ดขาด** ใช้หน่วยย่อยแบบ integer (เช่น cents) หรือ decimal library แทน — floating point ไม่สามารถแทนค่า `0.1` ได้อย่างแม่นยำ
+- **ตั้งชื่อ constant และจัดกลุ่มตัวที่เกี่ยวข้องกัน** ไว้ใน `const` block เดียวที่มี type กำหนดไว้
+- **ตั้งชื่อให้สั้นในขอบเขตเล็ก ๆ** `i`, `err`, `w`, `r` เป็น idiomatic Go ไม่ใช่ความขี้เกียจ ชื่อยาว ๆ ควรสงวนไว้สำหรับ identifier ระดับ package
+
+<CardGrid>
+  <Card
+    title="Control Flow →"
+    href="/docs/golang-fundamentals/control-flow"
+    description="if, for, switch และ defer"
+  />
+</CardGrid>

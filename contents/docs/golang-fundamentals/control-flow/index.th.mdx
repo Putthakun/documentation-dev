@@ -1,0 +1,222 @@
+---
+title: Control Flow
+description: if, for, switch และ defer — ชุด control structure ที่เล็กโดยตั้งใจของ Go
+keywords: ["golang if", "golang for loop", "range", "switch", "defer", "control flow"]
+---
+
+Go มี control structure อยู่แค่สามแบบเท่านั้น: `if`, `for` และ `switch` ไม่มี `while` ไม่มี `do-while` ไม่มี ternary operator บวกกับ `defer` ซึ่งไม่มี equivalent ในภาษาส่วนใหญ่
+
+## if
+
+ไม่มีวงเล็บครอบเงื่อนไข และต้องมีปีกกาเสมอ:
+
+```go showLineNumbers
+if count > 10 {
+    return errors.New("too many items")
+}
+
+if err != nil {
+    return err
+} else if count == 0 {
+    return nil
+}
+```
+
+### ตัวแปรที่ scope อยู่ใน statement
+
+`if` สามารถรัน statement สั้น ๆ ก่อนเช็คเงื่อนไขได้ ตัวแปรที่มันประกาศจะอยู่ใน scope ของ block `if`/`else` เท่านั้น — สิ่งนี้พบได้บ่อยมากใน Go สำหรับการจัดการ error:
+
+```go showLineNumbers
+if err := db.Ping(); err != nil {
+    return fmt.Errorf("database unreachable: %w", err)
+}
+// err does not exist out here
+
+if user, err := findUser(id); err == nil {
+    fmt.Println(user.Name)
+}
+```
+
+<Note title="แนวทางปฏิบัติที่ดี" type="success">
+  จำกัด scope ของตัวแปรให้แคบที่สุดเท่าที่จะทำได้ `if err := doThing(); err != nil` ป้องกันไม่ให้
+  `err` รั่วไหลเข้าไปในส่วนที่เหลือของ function ซึ่งช่วยป้องกันการเช็ค error ที่เก่าแล้วโดยไม่ตั้งใจในภายหลัง
+</Note>
+
+## for — loop เพียงแบบเดียว
+
+ทุก loop ใน Go คือ `for` เพียงแต่มันมีสี่รูปแบบ:
+
+```go showLineNumbers
+// 1. Classic three-part loop
+for i := 0; i < 10; i++ {
+    fmt.Println(i)
+}
+
+// 2. Condition only — this is Go's "while"
+for count < 100 {
+    count *= 2
+}
+
+// 3. Infinite — used for servers, workers, retry loops
+for {
+    conn, err := listener.Accept()
+    if err != nil {
+        continue
+    }
+    go handle(conn)
+}
+
+// 4. range — iterate a slice, map, string, or channel
+for i, item := range items {
+    fmt.Println(i, item)
+}
+```
+
+### รายละเอียดของ range
+
+```go showLineNumbers
+// Index only
+for i := range items { }
+
+// Value only — discard the index with _
+for _, item := range items { }
+
+// Maps yield key, value — in RANDOM order every run
+for key, value := range m { }
+
+// Strings yield byte index and rune (not byte!) — handles UTF-8 correctly
+for i, r := range "héllo" {
+    fmt.Printf("%d: %c\n", i, r)
+}
+
+// Integers (Go 1.22+) — iterate 0..n-1
+for i := range 10 { }
+```
+
+<Note title="range copy ค่าให้เรา" type="warning">
+  `for _, item := range items` จะให้ **สำเนา** ของแต่ละ element กับคุณ การแก้ไข `item` จะไม่เปลี่ยนแปลง
+  slice ต้นฉบับ หากต้องการแก้ไขในตำแหน่งเดิม ให้ index เข้าถึงโดยตรง: `items[i].Field = x` สิ่งนี้ทำให้
+  Go beginner แทบทุกคนพลาดอย่างน้อยหนึ่งครั้ง
+</Note>
+
+### break และ continue
+
+```go showLineNumbers
+// Labels let you break out of nested loops — rare, but occasionally needed
+outer:
+for _, row := range grid {
+    for _, cell := range row {
+        if cell == target {
+            break outer
+        }
+    }
+}
+```
+
+## switch
+
+`switch` ของ Go **ไม่** fall through โดยค่าเริ่มต้น — ไม่ต้องมี `break` ท้ายแต่ละ case:
+
+```go showLineNumbers
+switch status {
+case StatusActive:
+    return "running"
+case StatusPending, StatusQueued:  // multiple values in one case
+    return "waiting"
+default:
+    return "unknown"
+}
+```
+
+### switch ที่ไม่มีเงื่อนไข
+
+`switch` ที่ไม่มีเงื่อนไขเป็นทางเลือกที่สะอาดกว่าสำหรับแทนที่ chain `if/else if` ที่ยาว:
+
+```go showLineNumbers
+switch {
+case score >= 90:
+    grade = "A"
+case score >= 80:
+    grade = "B"
+case score >= 70:
+    grade = "C"
+default:
+    grade = "F"
+}
+```
+
+`switch` ยังมีรูปแบบที่ scope อยู่ใน statement (`switch x := f(); x {`) และรูปแบบ type-switch สำหรับ interface ซึ่งจะพูดถึงใน [Interfaces](/docs/golang-fundamentals/interfaces)
+
+## defer
+
+`defer` กำหนดตารางให้เรียก function เมื่อ **function** ที่ล้อมรอบมัน return — ไม่ว่ามันจะ return ด้วยวิธีไหนก็ตาม รวมถึงตอนเกิด panic ด้วย นี่คือวิธีที่ Go ใช้ทำ cleanup
+
+```go showLineNumbers
+func readConfig(path string) ([]byte, error) {
+    f, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer f.Close()   // runs on every return path below
+
+    // ... many early returns ...
+    return io.ReadAll(f)
+}
+```
+
+การวาง `defer f.Close()` ทันทีหลังจาก open สำเร็จ หมายความว่าคุณจะไม่มีวันลืมปิดมัน ไม่ว่าคุณจะเพิ่ม `return` statement อีกกี่ตัวในภายหลังก็ตาม
+
+### การเรียก defer จะรันแบบ LIFO
+
+<Mermaid chart="graph TD
+  A[defer A] --> B[defer B]
+  B --> C[defer C]
+  C --> R[function returns]
+  R --> C2[C runs first]
+  C2 --> B2[then B]
+  B2 --> A2[then A]" />
+
+```go showLineNumbers
+func example() {
+    defer fmt.Println("first")
+    defer fmt.Println("second")
+    defer fmt.Println("third")
+}
+// Output: third, second, first
+```
+
+### Argument ถูก evaluate ทันที
+
+นี่คือกับดักคลาสสิกของ `defer`:
+
+```go showLineNumbers
+i := 0
+defer fmt.Println(i)  // prints 0 — i's value was captured HERE
+i = 99
+// ... function returns, prints 0, not 99
+
+// Use a closure if you want the value at return time:
+defer func() { fmt.Println(i) }()  // prints 99
+```
+
+<Note title="defer ภายใน loop" type="danger">
+  `defer` จะทำงานตอนที่ **function** ออก ไม่ใช่ตอนจบแต่ละรอบของ loop การเปิดไฟล์ใน loop ด้วย
+  `defer f.Close()` จะทำให้ทุกไฟล์ยังเปิดค้างอยู่จนกว่าทั้ง function จะจบ — และจะทำให้ file descriptor
+  หมดถ้า loop มีขนาดใหญ่ ให้แยก body ออกไปเป็น function ของตัวเอง หรือเรียก `Close()` โดยตรงแทน
+</Note>
+
+## แนวทางปฏิบัติที่ดี
+
+- **จัดการ error ให้เร็วและ return ออกไป** ใช้ guard clause แทนการซ้อน — โค้ด Go ควรอ่านจากบนลงล่าง โดยมี happy path อยู่ที่ indentation ซ้ายสุด
+- **`defer` cleanup ทันทีหลังจากได้ resource มา** (file, lock, transaction, connection) เพื่อไม่ให้ลืม
+- **ใช้ `switch` แบบไม่มีเงื่อนไข** แทน chain `if/else if` ที่ยาว
+- **ระวัง copy ของ `range`** เมื่อคุณตั้งใจจะแก้ไข element
+- **หลีกเลี่ยง `goto` และ labeled break** เว้นแต่ทางเลือกอื่นจะแย่กว่าจริง ๆ
+
+<CardGrid>
+  <Card
+    title="Functions →"
+    href="/docs/golang-fundamentals/functions"
+    description="Multiple returns, variadics และ closures"
+  />
+</CardGrid>

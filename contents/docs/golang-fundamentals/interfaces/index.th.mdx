@@ -1,0 +1,200 @@
+---
+title: Interface
+description: implicit interface ของ Go, ทำไม interface เล็ก ๆ ถึงชนะ, type assertion กับ type switch และกับดัก typed-nil
+keywords: ["golang interface", "implicit satisfaction", "type assertion", "type switch", "any", "typed nil"]
+---
+
+## Interface คืออะไร
+
+Interface คือชุดของ method signature Type ใดก็ตามที่มี method เหล่านั้น จะ satisfy interface นั้น — **โดยอัตโนมัติ** โดยไม่ต้องประกาศอะไรเพิ่ม:
+
+```go showLineNumbers
+type Shape interface {
+    Area() float64
+    Perimeter() float64
+}
+
+type Rectangle struct{ Width, Height float64 }
+
+func (r Rectangle) Area() float64      { return r.Width * r.Height }
+func (r Rectangle) Perimeter() float64 { return 2 * (r.Width + r.Height) }
+
+// Rectangle now satisfies Shape. No "implements" keyword anywhere.
+var s Shape = Rectangle{Width: 3, Height: 4}
+```
+
+<Mermaid chart="graph BT
+  R[Rectangle<br/>Area, Perimeter] --> S[Shape interface<br/>Area, Perimeter]
+  C[Circle<br/>Area, Perimeter] --> S
+  T[Triangle<br/>Area, Perimeter] --> S" />
+
+นี่คือ **implicit satisfaction** และมันคือความแตกต่างหลักจาก Java หรือ C# ผลที่ตามมาสำคัญมาก: คุณสามารถนิยาม interface ที่ type ที่มีอยู่แล้ว — รวมถึง type จาก library ที่คุณควบคุมไม่ได้ — satisfy อยู่แล้ว
+
+## Interface เป็นของฝั่งผู้ใช้งาน
+
+เนื่องจากการ satisfy เป็นแบบ implicit ตำแหน่ง idiomatic ในการนิยาม interface คือ package ที่*ใช้*มัน ไม่ใช่ package ที่ implement มัน:
+
+```go showLineNumbers title="service/user.go"
+// The service declares only what it needs.
+type UserStore interface {
+    GetUser(ctx context.Context, id string) (*User, error)
+}
+
+type UserService struct {
+    store UserStore   // any type with GetUser works
+}
+
+func (s *UserService) Profile(ctx context.Context, id string) (*User, error) {
+    return s.store.GetUser(ctx, id)
+}
+```
+
+Postgres implementation ของคุณไม่จำเป็นต้องรู้ด้วยซ้ำว่า interface นี้มีอยู่ ในเทสต์คุณส่ง fake ที่มี method เดียวกันเข้าไป — ไม่ต้องใช้ mocking framework เลย นี่คือเหตุผลที่ codebase ของ Go เทสต์ได้ง่าย
+
+## ทำให้ interface เล็ก
+
+Standard library เป็นตัวกำหนดแนวทาง — interface ที่ถูกใช้มากที่สุดใน Go มีแค่ method เดียว:
+
+```go showLineNumbers
+type Stringer interface { String() string }
+type Reader   interface { Read(p []byte) (n int, err error) }
+type Writer   interface { Write(p []byte) (n int, err error) }
+type error    interface { Error() string }
+```
+
+<Note title="ยิ่ง interface ใหญ่ ยิ่ง abstraction อ่อนแอ" type="success">
+  สุภาษิตของ Go และเป็นคำแนะนำที่ดี Interface ที่มี method เดียวสามารถถูก satisfy ได้โดยแทบทุกอย่าง
+  และ fake ในเทสต์ได้ง่ายมาก Interface ที่มี 10 method บังคับให้ทุก implementation — และทุก
+  test double — ต้องมีครบทั้ง 10 method นิยาม interface ที่เล็กที่สุดที่ครอบคลุมสิ่งที่คุณเรียกใช้จริง ๆ
+</Note>
+
+การ implement `Stringer` เป็นการลงทุนที่คุ้มค่าและถูก — `fmt` ใช้มันให้อัตโนมัติ:
+
+```go showLineNumbers
+func (u User) String() string {
+    return fmt.Sprintf("User(%s, %s)", u.ID, u.Name)
+}
+
+fmt.Println(user)  // calls String() for you
+```
+
+## Empty interface: any
+
+`interface{}` (มี alias ว่า `any` ตั้งแต่ Go 1.18) ไม่มี method เลย ดังนั้น **ทุก** type จึง satisfy มัน:
+
+```go showLineNumbers
+var x any
+x = 42
+x = "hello"
+x = User{}
+```
+
+คุณจะสูญเสีย type information ทั้งหมด ดังนั้นคุณต้องใช้ type assertion เพื่อดึงมันกลับมา ใช้ `any` แต่พอประมาณ — ส่วนใหญ่สำหรับ JSON ที่ไม่รู้รูปร่างล่วงหน้า หรือ container ที่ generic จริง ๆ Generics มักจะเป็นคำตอบที่ดีกว่าในตอนนี้
+
+## Type assertions
+
+ดึง concrete value ออกมาจาก interface **ใช้รูปแบบสองค่าเสมอ** — รูปแบบค่าเดียวจะ panic เมื่อล้มเหลว:
+
+```go showLineNumbers
+var i any = "hello"
+
+s, ok := i.(string)   // safe: s="hello", ok=true
+if !ok {
+    // not a string
+}
+
+n, ok := i.(int)      // safe: n=0, ok=false
+
+s := i.(string)       // panics if i is not a string — avoid
+```
+
+## Type switches
+
+วิธีที่สะอาดที่สุดในการแยก branch ตาม type ที่เป็นไปได้หลายแบบ:
+
+```go showLineNumbers
+func describe(i any) string {
+    switch v := i.(type) {
+    case nil:
+        return "nil"
+    case int:
+        return fmt.Sprintf("int: %d", v)
+    case string:
+        return fmt.Sprintf("string of length %d", len(v))
+    case []int:
+        return fmt.Sprintf("int slice with %d items", len(v))
+    case error:
+        return "error: " + v.Error()
+    default:
+        return fmt.Sprintf("unknown type %T", v)
+    }
+}
+```
+
+ภายในแต่ละ case `v` จะมี concrete type ของ case นั้น
+
+## กับดัก typed-nil
+
+นี่คือ interface bug ที่ทำให้แม้แต่ Go developer ที่มีประสบการณ์ก็พลาดได้ ไม่ใช่แค่ beginner:
+
+```go showLineNumbers
+type MyError struct{ msg string }
+func (e *MyError) Error() string { return e.msg }
+
+func doWork() error {
+    var err *MyError = nil   // a nil POINTER
+    return err               // returned as an interface
+}
+
+if doWork() != nil {
+    fmt.Println("this branch RUNS")  // surprising!
+}
+```
+
+Interface value ประกอบด้วย **สอง** สิ่ง: type และ value ในที่นี้ type คือ `*MyError` และ value คือ `nil` — ดังนั้น interface เองจึงไม่เป็น nil เพราะ field ของ type ถูกตั้งค่าไว้แล้ว
+
+<Note title="วิธีหลีกเลี่ยงมัน" type="danger">
+  อย่าประกาศตัวแปร error ที่มี type แล้ว return มันโดยตรง Return `nil` แบบ literal หรือ assign
+  ให้ตัวแปร `error` เฉพาะเมื่อมี error จริงเท่านั้น:
+
+  ```go
+  func doWork() error {
+      if somethingFailed {
+          return &MyError{msg: "failed"}
+      }
+      return nil   // untyped nil — the interface is truly nil
+  }
+  ```
+</Note>
+
+## รับ interface, return struct
+
+แนวทางของ Go ที่ถูกใช้กันอย่างแพร่หลาย:
+
+```go showLineNumbers
+// Accept an interface — callers can pass a file, buffer, network conn, or test fake
+func Process(r io.Reader) error
+
+// Return a concrete type — callers get the full API and can decide
+// what interface to treat it as
+func NewClient(url string) *Client
+```
+
+การ return interface จะซ่อน capability จากผู้เรียกใช้ และทำให้ API ขยายในภายหลังได้ยากขึ้นโดยไม่ทำให้คนอื่นพัง
+
+## แนวทางปฏิบัติที่ดี
+
+- **นิยาม interface ตรงที่มันถูกใช้งาน** ไม่ใช่ข้าง ๆ implementation
+- **จำกัดให้มี 1-3 method** แยก interface ใหญ่ ๆ ออกจากกัน
+- **ใช้ type assertion แบบสองค่าเสมอ** เพื่อหลีกเลี่ยง panic
+- **Return `nil` แบบ literal เสมอ** ไม่ใช่ typed nil pointer จาก function ที่ return `error`
+- **อย่าสร้าง interface จนกว่าจะมี implementation ตัวที่สอง** (หรือเทสต์ที่ต้องการ fake) Interface ที่สร้างก่อนเวลาอันควรเป็น code smell ที่พบบ่อยใน Go
+- **ใช้ `any` แต่น้อย** เลือก concrete type หรือ generics ดีกว่า
+
+<CardGrid>
+  <Card
+    title="Packages & Modules →"
+    href="/docs/golang-fundamentals/packages-modules"
+    description="go.mod, imports และความหมายของการใช้ตัวพิมพ์ใหญ่"
+  />
+</CardGrid>

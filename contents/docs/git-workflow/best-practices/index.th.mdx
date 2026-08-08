@@ -1,0 +1,75 @@
+---
+title: Cheatsheet แนวทางปฏิบัติที่ดี
+description: สรุปแบบย่อในหน้าเดียวของทุกอย่างในส่วน Git Workflow
+keywords: ["git best practices", "git cheatsheet", "commit conventions", "pull request etiquette"]
+---
+
+เหตุผลแบบเต็มๆ ของแต่ละข้ออยู่ในหน้าก่อนหน้านี้แล้ว — หน้านี้เป็นแค่ข้อมูลอ้างอิงแบบสรุปให้สแกนอ่านเร็วๆ เมื่อคุณเข้าใจแนวคิดอยู่แล้วและต้องการทบทวนเร็วๆ
+
+## Commit
+
+- Commit เป็นชุดเล็กๆ ที่มีเหตุผลและจุดประสงค์เดียว — ไม่ใช่ "ทิ้งงานตอนสิ้นวัน"
+- ใช้ [Conventional Commits](/docs/git-workflow/basics#writing-good-commit-messages): `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
+- เขียน *ทำไม* ไม่ใช่ *อะไร* — diff แสดงสิ่งที่เปลี่ยนอยู่แล้ว
+- อย่า commit ข้อมูลลับเด็ดขาด ใช้ `.gitignore` + environment variable (ดู [.gitignore & Git Hooks](/docs/git-workflow/gitignore-hooks))
+- `git diff --staged` ก่อน `git commit` ทุกครั้ง — รู้ให้ชัดว่ากำลังจะ commit อะไร
+- อย่า `--amend` หรือเขียนทับ commit ที่ push และแชร์ไปแล้ว
+
+## Branching
+
+- ตั้งชื่อ branch ตาม intent: `feature/x`, `fix/x`, `chore/x` — ไม่ใช่ `test`, `wip`, `asdf`
+- ให้ branch มีอายุสั้น Merge หรือ rebase จาก `main` บ่อยๆ เพื่อหลีกเลี่ยง conflict ที่ปวดหัวในภายหลัง
+- ลบ branch หลัง merge — ทั้งใน local (`git branch -d`) และบน remote
+- ใช้ [Feature Branch Workflow](/docs/git-workflow/workflow-strategies) เป็นค่าเริ่มต้น เว้นแต่จะมีเหตุผลเฉพาะให้ใช้ Git Flow หรือ Trunk-Based
+
+## Rebase vs Merge
+
+- `rebase` เฉพาะ branch ที่ **อยู่ใน local และไม่ได้แชร์** เท่านั้น อย่า rebase branch ที่คนอื่น pull ไปแล้ว
+- `merge` ปลอดภัยเสมอ รวมถึงบน branch ที่ใช้ร่วมกัน — มันไม่เขียนประวัติทับใหม่
+- ใช้ `rebase -i` เพื่อทำความสะอาด commit ของตัวเอง (squash, reword) ก่อนเปิด PR
+
+## Remotes
+
+- `git fetch` ก่อนถ้าไม่แน่ใจว่ามีอะไรเปลี่ยนบน remote — ปลอดภัยและไม่ทำลายอะไรเสมอ
+- Pull (หรือ rebase) ก่อน push; push จะถูกปฏิเสธถ้า remote ล้ำหน้าคุณไปแล้ว
+- อย่า `--force` push ไปยัง `main` หรือ branch ที่ใช้ร่วมกันเด็ดขาด ใช้ `--force-with-lease` บน branch ของตัวเองแทน
+
+## Undoing changes
+
+| สถานการณ์ | คำสั่ง |
+|---|---|
+| ทิ้งการเปลี่ยนแปลงของไฟล์ที่ยังไม่ commit | `git restore <file>` |
+| เอาไฟล์ออกจาก staging | `git restore --staged <file>` |
+| เก็บงานไว้ชั่วคราว | `git stash` |
+| ยกเลิก commit local ที่ยังไม่ได้ push | `git reset --soft/--hard HEAD~1` |
+| ยกเลิก commit ที่ push/แชร์ไปแล้ว | `git revert <commit>` |
+
+<Note title="กฎเดียวที่ป้องกันหายนะส่วนใหญ่" type="danger">
+  Local และยังไม่ push → ใช้ `reset` ได้เลย push/แชร์ไปแล้ว → ใช้ `revert` เสมอ ห้าม `reset
+  --hard` แล้ว force push
+</Note>
+
+## Conflicts
+
+1. `git status` เพื่อดูไฟล์ที่ conflict
+2. เปิดไฟล์แต่ละไฟล์ แก้ด้วยมือ ลบเครื่องหมาย `<<<<<<<` / `=======` / `>>>>>>>` ทั้งหมด
+3. `git add <file>` สำหรับไฟล์ที่แก้เสร็จแต่ละไฟล์
+4. `git commit` (merge) หรือ `git rebase --continue` (rebase)
+5. **รัน test ของคุณ** ก่อนถือว่าเสร็จ — conflict ที่ไม่มีเครื่องหมายเหลืออาจยังผิดในเชิงตรรกะได้
+6. `git merge --abort` / `git rebase --abort` เพื่อยกเลิกอย่างสะอาดได้ทุกเมื่อ
+
+## มารยาทของ Pull Request
+
+- ให้ PR เล็กและโฟกัส — รีวิวง่ายและเร็วกว่า ย้อนกลับง่ายกว่าถ้ามีอะไรผิดพลาด
+- เขียนคำอธิบายที่บอก *ทำไม* ลิงก์ issue/ticket ที่เกี่ยวข้อง และชี้จุดที่ผู้รีวิวควรให้ความสนใจเป็นพิเศษ
+- ตอบ comment รีวิวด้วยการแก้ไขหรือข้อโต้แย้งที่ชัดเจน — อย่าเงียบเฉยไม่สนใจ feedback
+- ตรวจสอบให้ CI (test, lint) ผ่านก่อนขอรีวิว
+- Squash commit ที่รกอย่าง "fix typo" / "address review" ก่อน merge (ผ่าน `rebase -i` หรือปุ่ม "Squash and merge" ของแพลตฟอร์ม)
+
+<CardGrid>
+  <Card
+    title="← กลับไปที่ภาพรวม Git Workflow"
+    href="/docs/git-workflow"
+    description="ไปยังส่วนใดก็ได้"
+  />
+</CardGrid>

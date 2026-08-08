@@ -1,0 +1,109 @@
+---
+title: ".gitignore และ Git Hooks"
+description: กัน build artifact และข้อมูลลับออกจาก repository และทำ automate การตรวจสอบก่อน commit ด้วย Git hooks
+keywords: ["gitignore", "git hooks", "pre-commit", "husky"]
+---
+
+## `.gitignore`
+
+ไฟล์ `.gitignore` บอก Git ว่าไฟล์/pattern ไหนไม่ควร track เลย — เช่น build output, dependency, ข้อมูลลับในเครื่อง, การตั้งค่า IDE มันอยู่ที่ root ของ repo (สามารถมี `.gitignore` ซ้อนในโฟลเดอร์ย่อยได้เพื่อกฎเฉพาะโฟลเดอร์นั้นๆ)
+
+```bash showLineNumbers title=".gitignore (Go project example)"
+# Binaries
+/bin/
+*.exe
+*.test
+
+# Dependency directories
+/vendor/
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+```
+
+<Note title="มันป้องกันได้แค่การ track ในอนาคต" type="warning">
+  `.gitignore` หยุด Git จากการ track ไฟล์ที่ตรงเงื่อนไข **ใหม่** เท่านั้น ถ้าไฟล์ถูก commit ไปแล้ว
+  การเพิ่มมันลง `.gitignore` จะไม่ลบมันออกจากประวัติ ต้อง untrack มันด้วยตัวเองแบบชัดเจน:
+
+  ```bash
+  git rm --cached .env
+  git commit -m "chore: stop tracking .env"
+  ```
+</Note>
+
+### ตรวจสอบว่าอะไรถูก ignore อยู่
+
+```bash showLineNumbers
+git check-ignore -v path/to/file   # ยืนยันว่ากฎไหนที่ ignore ไฟล์นี้อยู่ (มีประโยชน์ตอน debug)
+git status --ignored                # แสดงไฟล์ที่ถูก ignore ด้วย
+```
+
+## Git Hooks
+
+Hooks คือ script ที่ Git รันอัตโนมัติในจุดต่างๆ ของ workflow (ก่อน commit, ก่อน push, หลัง merge ฯลฯ) มันอยู่ใน `.git/hooks/` เป็น shell script ธรรมดา แต่โฟลเดอร์นั้นไม่ถูก commit เข้า repo โดยค่าเริ่มต้น — นี่คือเหตุผลที่ทีมส่วนใหญ่ใช้เครื่องมือช่วยจัดการและแชร์ hook
+
+### ตัวอย่าง hook แบบดิบ
+
+```bash showLineNumbers title=".git/hooks/pre-commit"
+#!/bin/sh
+# Run tests before allowing a commit
+go test ./... || {
+  echo "Tests failed — commit aborted."
+  exit 1
+}
+```
+
+ทำให้มัน executable ได้: `chmod +x .git/hooks/pre-commit` ตอนนี้ `git commit` จะรัน script นี้ก่อน และยกเลิก commit ถ้า test ล้มเหลว
+
+### จุด hook ที่พบบ่อย
+
+| Hook | รันเมื่อ | ใช้ทำอะไร |
+|---|---|---|
+| `pre-commit` | ก่อนสร้าง commit | Lint, format, รัน test ที่เร็ว |
+| `commit-msg` | หลังเขียน commit message เสร็จ | บังคับรูปแบบ message (เช่น Conventional Commits) |
+| `pre-push` | ก่อน `git push` | รัน test suite ทั้งหมด บล็อก push ถ้าล้มเหลว |
+| `post-merge` | หลัง merge เสร็จ | ติดตั้ง dependency อัตโนมัติถ้า `go.mod` เปลี่ยน |
+
+### แชร์ hook ในทีม
+
+เพราะ `.git/hooks/` ไม่ถูก commit ทีมส่วนใหญ่มักใช้เครื่องมืออย่าง **[Husky](https://typicode.github.io/husky/)** (โปรเจกต์ Node) หรือ **[pre-commit](https://pre-commit.com/)** (ใช้ได้กับทุกภาษา นิยมในโปรเจกต์ Go/Python) เพื่อกำหนด hook ไว้ในไฟล์ config ที่ถูก version และติดตั้งให้อัตโนมัติกับทุกคนที่ร่วมพัฒนา
+
+```bash showLineNumbers title="pre-commit example (.pre-commit-config.yaml)"
+repos:
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: gofmt
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        pass_filenames: false
+```
+
+## Best practices
+
+- **เพิ่ม `.gitignore` ก่อน commit แรกของคุณ** ไม่ใช่หลัง — มันง่ายกว่าการ untrack ไฟล์ทีหลังมาก
+- **อย่าพึ่งพา `.gitignore` เพียงอย่างเดียวสำหรับข้อมูลลับ** ใช้ environment variable และ secrets manager สำหรับสิ่งที่ sensitive; ถือว่า `.gitignore` เป็นแนวป้องกันสุดท้าย ไม่ใช่แผนหลัก
+- **ให้ pre-commit hook รันเร็ว** (lint/format ไม่ใช่ test suite ทั้งหมด) เพื่อไม่ให้ทุก commit ช้าลง — เก็บการตรวจสอบที่ช้ากว่าไว้ที่ `pre-push` หรือ CI
+- **Version การตั้งค่า hook ของคุณ** (Husky/pre-commit) เพื่อให้ทุกคนที่ร่วมพัฒนาได้รับการตรวจสอบเดียวกันโดยอัตโนมัติ
+
+<CardGrid>
+  <Card
+    title="Best Practices Cheatsheet →"
+    href="/docs/git-workflow/best-practices"
+    description="ทุกอย่างในส่วนนี้ สรุปให้อยู่ในหน้าเดียว"
+  />
+</CardGrid>

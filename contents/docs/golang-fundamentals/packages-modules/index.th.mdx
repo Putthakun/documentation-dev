@@ -1,0 +1,179 @@
+---
+title: Package และ Module
+description: วิธีที่โค้ด Go ถูกจัดระเบียบเป็น package และ module — go.mod, imports, exported names และ internal/
+keywords: ["golang packages", "go modules", "go.mod", "go.sum", "exported", "internal", "go mod tidy"]
+---
+
+Go มีการจัดระเบียบสองระดับ: **package** (directory ของไฟล์ `.go` ซึ่งเป็นหน่วยของการคอมไพล์และ visibility) และ **module** (กลุ่มของ package ที่ถูก version ร่วมกัน ซึ่งเป็นหน่วยของการจัดการ dependency)
+
+## Packages
+
+ทุกไฟล์ `.go` เริ่มต้นด้วยการประกาศ package ทุกไฟล์ใน directory เดียวกันต้องประกาศชื่อ package เดียวกัน:
+
+```go showLineNumbers
+package user
+```
+
+Conventions:
+
+- **ชื่อ package = ชื่อ directory** directory ชื่อ `internal/user/` จะมี `package user`
+- **สั้น, ตัวพิมพ์เล็ก, เอกพจน์, ไม่มี underscore:** `user`, `httputil`, `auth` — ไม่ใช่ `Users`, `user_service`, หรือ `userUtils`
+- **`package main` บ่งบอกว่าเป็น executable** มันต้องมี `func main()` และสร้าง binary ออกมา ส่วน package อื่น ๆ ทั้งหมดเป็น library
+
+### ชื่อคือ API — ตัวพิมพ์ใหญ่คือการควบคุมการเข้าถึง
+
+Go ไม่มี keyword `public`/`private` **identifier ที่ขึ้นต้นด้วยตัวพิมพ์ใหญ่คือ exported** (มองเห็นได้จาก package อื่น); ตัวพิมพ์เล็กคือไม่ exported:
+
+```go showLineNumbers title="internal/user/user.go"
+package user
+
+type User struct {      // exported
+    ID   string         // exported field
+    Name string         // exported field
+    salt string         // unexported — invisible outside this package
+}
+
+func New(name string) *User { }   // exported
+func hashPassword(s string) { }   // unexported — internal helper
+```
+
+<Note title="อย่าพูดซ้ำ" type="success">
+  ชื่อ package เป็นส่วนหนึ่งของทุกการเรียกใช้อยู่แล้ว ดังนั้น `user.User` และ `user.NewUser()`
+  อ่านแล้วแปลก ๆ เลือกใช้ `user.New()`, `http.Client` (ไม่ใช่ `http.HTTPClient`), `bytes.Buffer`
+  (ไม่ใช่ `bytes.BytesBuffer`) ตั้งชื่อโดยสมมติว่ามี package qualifier นำหน้าอยู่แล้วเสมอ
+</Note>
+
+## Imports
+
+```go showLineNumbers
+import (
+    "fmt"           // standard library
+    "net/http"
+
+    "github.com/google/uuid"          // third-party
+
+    "github.com/you/app/internal/user" // your own module
+)
+```
+
+`gofmt`/`goimports` จะจัดกลุ่มและเรียงลำดับสิ่งเหล่านี้ให้อัตโนมัติ — standard library มาก่อน แล้วตามด้วยส่วนที่เหลือทั้งหมด ปล่อยให้เครื่องมือทำหน้าที่นี้ไป
+
+```go showLineNumbers
+import (
+    "fmt"
+    f "fmt"            // alias, for name collisions
+    _ "github.com/lib/pq"  // blank import — runs init() only, common for DB drivers
+)
+```
+
+Import path คือ **module path บวก directory** ไม่ใช่ชื่อ package — นี่คือเหตุผลที่ module path ใน `go.mod` มีความสำคัญ
+
+## Modules
+
+Module ถูกกำหนดโดย `go.mod` ที่ root ของ repository:
+
+```go showLineNumbers title="go.mod"
+module github.com/you/app
+
+go 1.25
+
+require (
+    github.com/google/uuid v1.6.0
+    github.com/jackc/pgx/v5 v5.7.1
+)
+
+require (
+    golang.org/x/text v0.19.0 // indirect
+)
+```
+
+- **`module`** — import path prefix สำหรับทุก package ใน repo นี้
+- **`go`** — เวอร์ชันของภาษา ซึ่งยังกำหนดว่าการเปลี่ยนแปลงพฤติกรรมใดจะมีผล (เช่นการแก้ loop variable ใน Go 1.22)
+- **`require`** — dependency โดยตรง; `// indirect` หมายถึง dependency ของ dependency คุณ
+
+### go.sum
+
+`go.sum` บันทึก cryptographic checksum ของ dependency ทุกเวอร์ชัน ถ้าเนื้อหาของ module ที่ publish ไปแล้วเปลี่ยนแปลงเมื่อไหร่ การ build จะล้มเหลวแทนที่จะดึงโค้ดที่ต่างออกไปแบบเงียบ ๆ
+
+<Note title="Commit ทั้งสองไฟล์" type="warning">
+  ทั้ง `go.mod` และ `go.sum` ควรอยู่ใน version control หากไม่มี `go.sum` คุณจะสูญเสียการรับประกันว่า
+  CI และเพื่อนร่วมทีมของคุณ build โค้ด dependency ตัวเดียวกันทุกประการ อย่าเพิ่มมันลงใน `.gitignore` เด็ดขาด
+</Note>
+
+### คำสั่ง module ที่ใช้บ่อย
+
+| Command | สิ่งที่มันทำ |
+|---|---|
+| `go mod init github.com/you/app` | สร้าง module ใหม่ |
+| `go get github.com/pkg/name` | เพิ่มหรืออัปเกรด dependency |
+| `go get -u ./...` | อัปเกรด dependency ทั้งหมดเป็นเวอร์ชัน minor/patch ล่าสุด |
+| `go mod tidy` | เพิ่มอะไรก็ตามที่ import แต่ยังขาด และลบสิ่งที่ไม่ได้ใช้ออก |
+| `go mod download` | ดาวน์โหลด dependency โดยไม่ build (มีประโยชน์สำหรับ Docker layer caching) |
+| `go mod why github.com/pkg/name` | อธิบายว่าทำไม dependency นี้ถึงอยู่ใน graph ของคุณ |
+
+รัน `go mod tidy` ก่อน commit — มันเป็นสิ่งเดียวกับการทำความสะอาด import ที่ไม่ได้ใช้ แต่ในระดับ module
+
+## internal/ — privacy ที่บังคับใช้จริง
+
+Package ภายใต้ directory ที่ชื่อ `internal/` สามารถถูก import ได้เฉพาะจากโค้ดที่อยู่ใต้ parent ของ `internal/` directory นั้น **Compiler** เป็นตัวบังคับใช้กฎนี้:
+
+<FileTree>
+  <Folder name="app" defaultOpen>
+    <Folder name="cmd" defaultOpen>
+      <Folder name="api">
+        <File name="main.go" />
+      </Folder>
+    </Folder>
+    <Folder name="internal" defaultOpen>
+      <Folder name="user">
+        <File name="user.go" />
+      </Folder>
+      <Folder name="database">
+        <File name="postgres.go" />
+      </Folder>
+    </Folder>
+    <Folder name="pkg">
+      <Folder name="httputil">
+        <File name="middleware.go" />
+      </Folder>
+    </Folder>
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+ในที่นี้ `internal/user` สามารถ import ได้จากทุกที่ภายใน `github.com/you/app` แต่ **ไม่มี module อื่นใดสามารถ import มันได้** — แม้ว่ามันจะเป็น public GitHub repo ก็ตาม `pkg/httputil` สามารถ import ได้โดยใครก็ตาม
+
+<Note title="ใช้ internal/ เป็นค่าเริ่มต้น" type="success">
+  วางโค้ดไว้ใน `internal/` เว้นแต่คุณตั้งใจจะสนับสนุนมันในฐานะ public API สำหรับโปรเจกต์อื่น
+  อะไรก็ตามที่ export ออกไปนอก `internal/` คือคำสัญญาที่คุณต้องรักษาไว้ — การย้ายมันในภายหลังคือ
+  breaking change สำหรับผู้ใช้งานของคุณ
+</Note>
+
+## init()
+
+Package สามารถนิยาม `func init()` ซึ่งจะรันครั้งเดียวก่อน `main()` ใช้มันแต่น้อย — มันรันแบบ implicit ซึ่งทำให้การเริ่มโปรแกรมติดตามได้ยากและเทสต์ได้ยาก
+
+```go showLineNumbers
+func init() {
+    // Prefer explicit setup in main() over this.
+}
+```
+
+## แนวทางปฏิบัติที่ดี
+
+- **ตั้งชื่อ package ตามสิ่งที่มันให้บริการ** ไม่ใช่ตามสิ่งที่มันมีอยู่ข้างใน หลีกเลี่ยง package แบบ grab-bag ที่ชื่อ `util`, `common`, `helpers` หรือ `models` — พวกมันดึงดูดโค้ดที่ไม่เกี่ยวข้องกันเข้าไปเรื่อย ๆ
+- **จำกัด exported surface ให้เล็ก** Export เฉพาะสิ่งที่ผู้เรียกใช้ต้องการ; ที่เหลือให้เป็นตัวพิมพ์เล็ก
+- **ใช้ `internal/`** สำหรับโค้ดของ application เป็นค่าเริ่มต้น
+- **ใช้ URL ของ repo เป็น module path** ตั้งแต่วันแรก
+- **รัน `go mod tidy` ก่อน commit**
+- **หลีกเลี่ยง circular import** — Go ห้ามสิ่งนี้อย่างเด็ดขาด ถ้า package สองตัวต้องการกันและกัน ส่วนที่ใช้ร่วมกันมักควรเป็น package ที่สาม (หรือ interface ที่นิยามไว้ในฝั่งผู้ใช้งาน)
+
+การจัดวางโปรเจกต์ในระดับที่ใหญ่ขึ้น — ตำแหน่งที่ handler, service และ repository ควรอยู่ — จะพูดถึงใน [Code Organization](/docs/code-organization)
+
+<CardGrid>
+  <Card
+    title="Errors: The Basics →"
+    href="/docs/golang-fundamentals/errors-basics"
+    description="ทำไม Go ถึง return error แทนที่จะ throw มัน"
+  />
+</CardGrid>

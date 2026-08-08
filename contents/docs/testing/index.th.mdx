@@ -1,0 +1,398 @@
+---
+title: การเขียน Test
+description: การเขียนเทสต์ที่มีประสิทธิภาพใน Go
+keywords: ["golang testing", "table-driven tests", "test coverage", "integration test", "test double", "go test"]
+---
+
+## โมเดลการทดสอบของ Go
+
+ไม่มี framework ให้ต้องเลือก Test คือฟังก์ชัน Go ธรรมดา ๆ ในไฟล์ที่ลงท้ายด้วย `_test.go` และ
+`go test` จะรันมัน:
+
+```go showLineNumbers title="internal/order/total_test.go"
+package order
+
+import "testing"
+
+func TestTotal(t *testing.T) {
+    o := Order{Quantity: 3, UnitPrice: 500}
+
+    got := o.Total()
+
+    if got != 1500 {
+        t.Errorf("Total() = %d, want 1500", got)
+    }
+}
+```
+
+```bash showLineNumbers
+go test ./...              # everything
+go test ./internal/order   # one package
+go test -run TestTotal ./... # one test, by regex
+go test -v ./...           # show each test as it runs
+```
+
+มี verb สำหรับความล้มเหลวสองแบบ: `t.Errorf` บันทึกความล้มเหลวแล้วทำงานต่อ, `t.Fatalf` หยุด test นั้น
+ทันที ใช้ `Fatalf` เมื่อการทำงานต่อจะทำให้ panic — เช่น `nil` ที่ return มาพร้อมกับ error ที่ไม่คาดคิด —
+และใช้ `Errorf` ในกรณีอื่น เพื่อให้การรันครั้งเดียวรายงานปัญหาทุกอย่างที่พบ
+
+<Note title="ทดสอบใน package เดียวกันเป็นค่าเริ่มต้น" type="success">
+  ไฟล์ใน `package order` เข้าถึงฟังก์ชันที่ไม่ได้ export ได้; `package order_test` เห็นแค่ API ที่
+  export เท่านั้น การอยู่ใน package เดียวกันคือค่าเริ่มต้นที่ใช้งานได้จริง เลือกใช้ `_test` เมื่อคุณ
+  ต้องการพิสูจน์เจาะจงว่า public API ใช้งานได้ด้วยตัวเอง หรือเพื่อตัด import cycle ในตัว test เอง
+</Note>
+
+## Table-driven tests
+
+รูปแบบมาตรฐานใน Go หนึ่งฟังก์ชัน test, slice ของ case, `t.Run` สำหรับแต่ละอัน:
+
+```go showLineNumbers title="internal/order/validate_test.go"
+func TestPlaceRequest_Validate(t *testing.T) {
+    tests := []struct {
+        name    string
+        req     PlaceRequest
+        wantErr error
+    }{
+        {
+            name: "valid",
+            req:  PlaceRequest{ProductID: 1, Quantity: 2},
+        },
+        {
+            name:    "zero quantity",
+            req:     PlaceRequest{ProductID: 1, Quantity: 0},
+            wantErr: ErrInvalidQuantity,
+        },
+        {
+            name:    "negative quantity",
+            req:     PlaceRequest{ProductID: 1, Quantity: -5},
+            wantErr: ErrInvalidQuantity,
+        },
+        {
+            name:    "missing product",
+            req:     PlaceRequest{Quantity: 2},
+            wantErr: ErrProductRequired,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            err := tt.req.Validate()
+
+            if !errors.Is(err, tt.wantErr) {
+                t.Errorf("Validate() error = %v, want %v", err, tt.wantErr)
+            }
+        })
+    }
+}
+```
+
+การเพิ่ม case ที่ห้าคือแค่การเพิ่ม struct literal หนึ่งอัน `t.Run` ให้แต่ละ case มีชื่อของตัวเองใน
+output ดังนั้นความล้มเหลวจะอ่านได้ว่า `--- FAIL: TestPlaceRequest_Validate/negative_quantity` และคุณ
+จะรู้ทันทีว่า input ไหนที่พังโดยไม่ต้องอ่านโค้ด
+
+<Note title="เขียนข้อความความล้มเหลวที่ไม่ต้องพึ่ง source code" type="success">
+  รูปแบบที่ใช้กันคือ `got = %v, want %v` รวมถึงระบุ input ไว้ด้วยเมื่อมันไม่ชัดเจนในตัวเอง:
+
+  ```go
+  t.Errorf("Total(%d, %d) = %d, want %d", qty, price, got, want)
+  ```
+
+  ข้อความอย่าง `t.Error("failed")` ไม่บอกอะไรคุณเลยตอนตีสองเช้า — คุณต้องเปิดไฟล์และประกอบ case ขึ้นมา
+  ใหม่ คุณค่าทั้งหมดของ test suite คือสิ่งที่มันบอกคุณเมื่อมัน fail
+</Note>
+
+## Fake ดีกว่า mocking library
+
+เพราะ interface ถูก satisfy แบบ implicit และควรมีขนาดเล็ก
+([Interfaces](/docs/golang-fundamentals/interfaces),
+[SOLID Principles](/docs/solid-principles)) test double มักจะเป็นแค่ struct ที่มีสอง method —
+ไม่ต้องใช้ library, ไม่ต้อง generate code, ไม่ต้องเรียนรู้ DSL ใด ๆ
+
+```go showLineNumbers title="internal/order/service_test.go"
+type fakeProductStore struct {
+    price int64
+    err   error
+}
+
+func (f fakeProductStore) PriceOf(ctx context.Context, id int64) (int64, error) {
+    return f.price, f.err
+}
+
+type fakeOrderStore struct {
+    created []*Order          // records what happened, for assertions
+}
+
+func (f *fakeOrderStore) Create(ctx context.Context, o *Order) error {
+    o.ID = int64(len(f.created) + 1)
+    f.created = append(f.created, o)
+    return nil
+}
+```
+
+```go showLineNumbers
+func TestService_Place(t *testing.T) {
+    orders := &fakeOrderStore{}
+    svc := NewService(fakeProductStore{price: 500}, orders, fakePayments{})
+
+    o, err := svc.Place(context.Background(), PlaceRequest{ProductID: 1, Quantity: 3})
+    if err != nil {
+        t.Fatalf("Place() error = %v", err)
+    }
+
+    if o.Total != 1500 {
+        t.Errorf("Total = %d, want 1500", o.Total)
+    }
+    if len(orders.created) != 1 {
+        t.Errorf("created %d orders, want 1", len(orders.created))
+    }
+}
+```
+
+การทดสอบ failure path ก็แค่ return error จาก fake — ไม่ต้องเสก `.On("PriceOf").Return(...)` ใด ๆ:
+
+```go showLineNumbers
+svc := NewService(fakeProductStore{err: errors.New("db down")}, orders, fakePayments{})
+```
+
+<Note title="ถ้าทำ fake ยาก แปลว่า design มีปัญหา" type="warning">
+  การต้องพึ่ง mocking library มักหมายความว่า interface ใหญ่เกินไป หรือโค้ดขึ้นกับ concrete type ที่
+  ควรจะรับเป็น parameter แทน test ที่ต้องมี setup ที่ซับซ้อนกำลังบอกอะไรบางอย่างเกี่ยวกับโค้ดที่ถูกทดสอบ
+  ไม่ใช่เกี่ยวกับการทดสอบเอง แก้ที่ seam — ดู [Dependency Inversion](/docs/solid-principles)
+</Note>
+
+## Helper, cleanup, และ parallelism
+
+```go showLineNumbers
+// t.Helper() makes failures report the CALLER's line, not this function's.
+func mustPlace(t *testing.T, svc *Service, req PlaceRequest) *Order {
+    t.Helper()
+    o, err := svc.Place(context.Background(), req)
+    if err != nil {
+        t.Fatalf("Place(%+v) error = %v", req, err)
+    }
+    return o
+}
+
+// t.Cleanup runs after the test, even if it fails or calls Fatalf.
+func newTestServer(t *testing.T) *httptest.Server {
+    srv := httptest.NewServer(handler)
+    t.Cleanup(srv.Close)
+    return srv
+}
+```
+
+`t.Cleanup` ดีกว่า `defer` ในตัว helper เพราะ `defer` ข้างใน helper จะยิงตอนที่ *helper* return
+ไม่ใช่ตอนที่ test จบ
+
+`t.Parallel()` รัน test พร้อมกัน — เร่งความเร็วได้จริงบน suite ที่เน้น I/O และมันยังเผยให้เห็น shared
+state ที่คุณไม่รู้ว่ามีอยู่ด้วย:
+
+```go showLineNumbers
+func TestSomething(t *testing.T) {
+    t.Parallel()
+    // ...
+}
+```
+
+<Note title="Parallel subtest ต้องมี fixture แยกจากกัน" type="warning">
+  Parallel subtest ที่แชร์ fake ตัวเดียว, database row เดียว, หรือไฟล์ temp ไฟล์เดียวกันจะรบกวนกันเอง
+  ในลักษณะที่ดูเหมือน flakiness ให้แต่ละ subtest มี fixture ของตัวเอง — สร้าง fake ไว้ข้างใน closure
+  ของ `t.Run` ไม่ใช่ไว้ข้างนอก loop
+</Note>
+
+## การทดสอบ HTTP handler
+
+`net/http/httptest` ให้คุณทดสอบ handler ได้โดยไม่ต้องมี network และไม่ต้องมี port:
+
+```go showLineNumbers title="internal/httpapi/order_handler_test.go"
+func TestOrderHandler_Create(t *testing.T) {
+    h := NewOrderHandler(&fakeService{})
+
+    body := strings.NewReader(`{"product_id":1,"quantity":3}`)
+    req := httptest.NewRequest(http.MethodPost, "/orders", body)
+    rec := httptest.NewRecorder()
+
+    h.Create(rec, req)
+
+    if rec.Code != http.StatusCreated {
+        t.Errorf("status = %d, want %d", rec.Code, http.StatusCreated)
+    }
+
+    var got order.Order
+    if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+        t.Fatalf("decoding response: %v", err)
+    }
+    if got.Total != 1500 {
+        t.Errorf("Total = %d, want 1500", got.Total)
+    }
+}
+```
+
+นี่คือที่ที่เหมาะสำหรับตรวจสอบ error mapping จาก
+[Error Handling](/docs/error-handling) — ตาราง `(service error → expected status)` ครอบคลุม
+boundary ทั้งหมดได้ในเทสต์เดียว
+
+## Golden files
+
+เมื่อ output ที่คาดหวังมีขนาดใหญ่ — JSON response ที่ถูก render, SQL migration ที่ generate ขึ้นมา —
+เก็บมันไว้ในไฟล์ใต้ `testdata/` แทนที่จะเป็น string literal และ regenerate มันด้วย flag:
+
+```go showLineNumbers
+var update = flag.Bool("update", false, "update golden files")
+
+func TestRenderInvoice(t *testing.T) {
+    got := RenderInvoice(sampleOrder)
+
+    golden := filepath.Join("testdata", "invoice.golden.json")
+    if *update {
+        if err := os.WriteFile(golden, got, 0o644); err != nil {
+            t.Fatal(err)
+        }
+    }
+
+    want, err := os.ReadFile(golden)
+    if err != nil {
+        t.Fatal(err)
+    }
+    if !bytes.Equal(got, want) {
+        t.Errorf("output differs from %s (run: go test -update)", golden)
+    }
+}
+```
+
+`testdata/` ถูก Go tool ละเว้น ดังนั้นอะไรก็ตามในนั้นปลอดภัยจาก compiler review diff ของ golden file
+ใน code review เหมือนกับการเปลี่ยนแปลงอื่น ๆ — ประเด็นคือการเปลี่ยนแปลง output ที่ไม่ได้ตั้งใจจะปรากฏ
+เป็น diff แทนที่จะหลุดรอดไปโดยไม่มีใครรู้
+
+## Coverage
+
+```bash showLineNumbers
+go test -cover ./...
+go test -coverprofile=cover.out ./...
+go tool cover -html=cover.out          # open an annotated view in the browser
+```
+
+มุมมองแบบ HTML คือส่วนที่มีประโยชน์: มันแสดง *บรรทัดไหน* ที่ไม่เคยรันเลย ส่วนเปอร์เซ็นต์มีประโยชน์
+น้อยกว่าที่คนส่วนใหญ่คิดกันมาก
+
+<Note title="Coverage วัดการรันโค้ด ไม่ใช่ความถูกต้อง" type="danger">
+  test ที่เรียกทุกฟังก์ชันแต่ไม่ assert อะไรเลยจะได้ 100% Coverage บอกแค่ว่าอะไร *ถูกรัน* ไม่เคยบอกว่า
+  behavior *ถูกตรวจสอบ* หรือไม่
+
+  ใช้มันเพื่อหาจุดบอด — error branch ที่ไม่มี test, ไฟล์ทั้งไฟล์ที่ 0% — ไม่ใช่ใช้เป็นเป้าหมาย
+  การไล่ตามตัวเลขจะทำให้เกิด test ที่เขียนขึ้นเพื่อ metric: assertion บนเรื่องจิ๊บจ๊อย, test สำหรับ
+  getter, และ mock ที่แค่ยืนยันว่าโค้ดเรียกฟังก์ชันที่มันเรียกอยู่แล้วอย่างชัดเจน มุ่งเป้าไปที่การทดสอบ
+  ทุก path ที่สำคัญ แล้วปล่อยให้ตัวเลขเป็นไปตามที่มันเป็น
+</Note>
+
+## Integration test กับ PostgreSQL จริง
+
+Unit test ที่ใช้ fake พิสูจน์ logic ของคุณได้ แต่พิสูจน์ไม่ได้ว่า SQL ของคุณถูกต้อง, schema ตรงกัน,
+หรือ constraint ทำงานตามที่คาดไว้ สำหรับเรื่องนั้นคุณต้องใช้ database จริง — และการ mock driver จะ
+ทดสอบแค่สมมติฐานของคุณเกี่ยวกับมันเท่านั้น
+
+แยกมันไว้ต่างหากเพื่อให้ suite ที่เร็วยังคงเร็วอยู่:
+
+```go showLineNumbers title="internal/postgres/order_store_test.go"
+func TestOrderStore_Create(t *testing.T) {
+    if testing.Short() {
+        t.Skip("skipping integration test")
+    }
+
+    pool := testPool(t)                       // connects, migrates, cleans up
+    store := NewOrderStore(pool)
+
+    o := &order.Order{UserID: 1, ProductID: 2, Quantity: 3}
+    if err := store.Create(context.Background(), o); err != nil {
+        t.Fatalf("Create() error = %v", err)
+    }
+    if o.ID == 0 {
+        t.Error("Create() did not set ID")
+    }
+
+    got, err := store.GetByID(context.Background(), o.ID)
+    if err != nil {
+        t.Fatalf("GetByID() error = %v", err)
+    }
+    if got.Quantity != 3 {
+        t.Errorf("Quantity = %d, want 3", got.Quantity)
+    }
+}
+```
+
+```go showLineNumbers title="internal/postgres/main_test.go"
+// testPool returns a pool against the test database and truncates
+// every table when the test finishes, so tests can't leak into each other.
+func testPool(t *testing.T) *pgxpool.Pool {
+    t.Helper()
+
+    url := os.Getenv("TEST_DATABASE_URL")
+    if url == "" {
+        t.Skip("TEST_DATABASE_URL not set")
+    }
+
+    pool, err := pgxpool.New(context.Background(), url)
+    if err != nil {
+        t.Fatalf("connecting: %v", err)
+    }
+
+    t.Cleanup(func() {
+        _, _ = pool.Exec(context.Background(),
+            `TRUNCATE orders, users, products RESTART IDENTITY CASCADE`)
+        pool.Close()
+    })
+    return pool
+}
+```
+
+```bash showLineNumbers
+docker run -d --name test-pg -e POSTGRES_PASSWORD=test -p 5433:5432 postgres:16
+export TEST_DATABASE_URL="postgres://postgres:test@localhost:5433/postgres"
+
+go test ./...              # everything, including integration
+go test -short ./...       # unit tests only — fast enough for save-on-write
+```
+
+<Note title="Truncate ระหว่าง test อย่าพึ่งลำดับการรัน" type="warning">
+  test ที่ผ่านได้เฉพาะเมื่อรันหลัง test อีกตัวจะล้มเหลวในวันที่มีใครเพิ่ม case ใหม่หรือรันด้วย
+  `-shuffle=on` reset state ใน `t.Cleanup` และอย่าสมมติว่า ID จะเป็น `1` เสมอ `RESTART IDENTITY
+  CASCADE` ข้างบนทำให้แต่ละ test เริ่มจากจุดเดียวกันทุกครั้ง
+</Note>
+
+## ตัวอย่างจริง: สองครึ่งมารวมกัน
+
+ฟีเจอร์เดียวกัน ถูกทดสอบทั้งสองระดับ:
+
+| | Unit test | Integration test |
+|---|---|---|
+| อยู่ที่ | `internal/order/service_test.go` | `internal/postgres/order_store_test.go` |
+| Dependency | Fake ที่เขียนเอง | PostgreSQL จริงใน Docker |
+| พิสูจน์ | ส่วนลด, validation, ลำดับการทำงาน | SQL รันได้, constraint ทำงานถูกต้อง, การ scan ทำงานได้ |
+| ระยะเวลา | ระดับไมโครวินาที | ระดับสิบมิลลิวินาที |
+| รันตอนไหน | ทุกครั้งที่ save | ทุกครั้งที่ push |
+
+test ส่วนใหญ่ของคุณควรเป็นแบบแรก และคุณควรมี test แบบที่สองมากพอที่ "มัน compile ได้" จะไม่ถูกสับสน
+กับ "query ถูกต้อง" การแยกด้วย `-short` ทำให้ทั้งสองแบบยังซื่อสัตย์อยู่: loop ที่เร็วยังคงเร็วทันที
+และ CI รันทุกอย่าง
+
+## แนวทางปฏิบัติที่ดี
+
+- **Table-driven ด้วย `t.Run`** คือรูปแบบมาตรฐาน การเพิ่ม case ควรเป็นแค่หนึ่งบรรทัด
+- **เขียนข้อความความล้มเหลวเป็น `got = %v, want %v`** พร้อม input — อ่านได้โดยไม่ต้องดู source
+- **เขียน fake เอง** ถ้ามันยาก ให้แก้ interface อย่าเพิ่ม mocking library
+- **`t.Helper()` ในทุก helper** เพื่อให้ความล้มเหลวชี้ไปที่บรรทัดจริง
+- **`t.Cleanup` มากกว่า `defer`** สำหรับอะไรก็ตามที่ helper สร้างขึ้น
+- **ทดสอบ behavior ไม่ใช่ implementation** การ assert ว่า internal method ไหนถูกเรียกจะทำให้ทุกครั้ง
+  ที่ refactor ต้องเขียน test ใหม่
+- **ใช้ coverage เพื่อหา branch ที่ไม่มี test** ไม่เคยใช้มันเป็นเป้าหมาย
+- **Integration test SQL ของคุณ** กับ PostgreSQL จริง โดยกั้นไว้หลัง `-short`
+- **Reset state ใน cleanup** อย่าปล่อยให้ test หนึ่งพึ่งพาสิ่งที่เหลืออยู่จาก test อีกตัว
+- **รัน `go test -race ./...` ใน CI** ([Concurrency](/docs/concurrency))
+
+<CardGrid>
+  <Card
+    title="PostgreSQL Advanced →"
+    href="/docs/postgresql-advanced"
+    description="Window functions, JSONB, CTEs, isolation levels, and query plans in depth."
+  />
+</CardGrid>

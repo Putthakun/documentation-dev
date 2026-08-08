@@ -1,0 +1,283 @@
+---
+title: การใช้ PostgreSQL จาก Go
+description: การเชื่อมต่อด้วย pgx, การ query อย่างปลอดภัย, การจัดการกรณีไม่มีแถว, transaction และการป้องกัน SQL injection
+keywords: ["pgx", "golang postgres", "database/sql", "sql injection", "prepared statement", "connection pool", "ErrNoRows"]
+---
+
+## เลือก driver
+
+| ตัวเลือก | ใช้เมื่อไหร่ |
+|---|---|
+| **pgx** (`github.com/jackc/pgx/v5`) | ตัวเลือกที่แนะนำเป็นค่าเริ่มต้น รองรับ PostgreSQL แบบ native, เร็ว, รองรับ type ได้ดี |
+| `database/sql` + pgx stdlib | เมื่อต้องการ interface มาตรฐาน (เช่น สำหรับ library ที่ต้องการ `*sql.DB`) |
+| ORM (GORM, ent) | เมื่อต้องการให้สร้าง model และ migration ให้อัตโนมัติ แลกมากับการควบคุม SQL ที่น้อยลง |
+| sqlc | สร้างโค้ด Go แบบ type-safe จากไฟล์ SQL ของคุณ — ตัวเลือกกลางๆ ที่ได้รับความนิยม |
+
+หน้านี้ใช้ **pgx v5** โดยตรง การเขียน SQL เองด้วยมือช่วยให้คุณควบคุมได้อย่างแม่นยำว่าอะไรกำลังรันอยู่กับฐานข้อมูล ซึ่งสำคัญกว่าที่ฟังดูตอนที่ต้อง debug ปัญหาด้าน performance
+
+## การเชื่อมต่อ
+
+ใช้ **pool** ไม่ใช่ connection เดียว — มันจัดการ concurrency และการเชื่อมต่อใหม่ให้คุณ:
+
+```go showLineNumbers title="db.go"
+package db
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
+func New(ctx context.Context) (*pgxpool.Pool, error) {
+    cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+    if err != nil {
+        return nil, fmt.Errorf("parsing DATABASE_URL: %w", err)
+    }
+
+    cfg.MaxConns = 10
+    cfg.MaxConnLifetime = time.Hour
+    cfg.MaxConnIdleTime = 30 * time.Minute
+
+    pool, err := pgxpool.NewWithConfig(ctx, cfg)
+    if err != nil {
+        return nil, fmt.Errorf("creating pool: %w", err)
+    }
+
+    if err := pool.Ping(ctx); err != nil {
+        return nil, fmt.Errorf("pinging database: %w", err)
+    }
+    return pool, nil
+}
+```
+
+สร้าง pool **ครั้งเดียว** ตอน startup แล้วส่งต่อไปใช้ — `pgxpool.Pool` ปลอดภัยสำหรับการใช้งานพร้อมกันจากหลาย goroutine
+
+<Note title="การกำหนดขนาด pool" type="warning">
+  `MaxConns` ที่สูงเกินไปเป็นปัญหาจริงๆ: ค่าเริ่มต้นของ `max_connections` ใน PostgreSQL คือ 100
+  และแต่ละ connection กินหน่วยความจำบนฝั่งเซิร์ฟเวอร์ ถ้า service ของคุณมี 5 instance และแต่ละตัวเปิด
+  50 connection ก็จะทำให้เซิร์ฟเวอร์หมด connection ได้ เริ่มต้นที่ประมาณ 10–25 ต่อ instance และกำหนดขนาด
+  ให้สอดคล้องกับขีดจำกัดจริงของ PostgreSQL ไม่ใช่จากความคาดหวังลอยๆ
+</Note>
+
+## Query แถวเดียว
+
+```go showLineNumbers
+func GetUser(ctx context.Context, pool *pgxpool.Pool, id int64) (*User, error) {
+    var u User
+    err := pool.QueryRow(ctx,
+        `SELECT id, email, name, created_at FROM users WHERE id = $1`, id,
+    ).Scan(&u.ID, &u.Email, &u.Name, &u.CreatedAt)
+
+    if errors.Is(err, pgx.ErrNoRows) {
+        return nil, ErrUserNotFound          // your own sentinel error
+    }
+    if err != nil {
+        return nil, fmt.Errorf("querying user %d: %w", id, err)
+    }
+    return &u, nil
+}
+```
+
+<Note title="ไม่มีแถวไม่ใช่ความล้มเหลว" type="success">
+  `pgx.ErrNoRows` (`sql.ErrNoRows` ใน `database/sql`) หมายความว่า query รันสำเร็จแต่ไม่ตรงกับอะไรเลย
+  ปกติแล้วนั่นควรเป็น 404 ไม่ใช่ 500 ตรวจสอบมันแยกจาก error จริงๆ เสมอ และแปลงมันเป็น domain error
+  ของตัวเอง — ดู [Errors: The Basics](/docs/golang-fundamentals/errors-basics)
+</Note>
+
+## Query หลายแถว
+
+```go showLineNumbers
+func ListOrders(ctx context.Context, pool *pgxpool.Pool, userID int64) ([]Order, error) {
+    rows, err := pool.Query(ctx,
+        `SELECT id, user_id, product_id, quantity, status
+         FROM orders WHERE user_id = $1 ORDER BY created_at DESC`, userID)
+    if err != nil {
+        return nil, fmt.Errorf("querying orders: %w", err)
+    }
+    defer rows.Close()
+
+    orders := make([]Order, 0)
+    for rows.Next() {
+        var o Order
+        if err := rows.Scan(&o.ID, &o.UserID, &o.ProductID, &o.Quantity, &o.Status); err != nil {
+            return nil, fmt.Errorf("scanning order: %w", err)
+        }
+        orders = append(orders, o)
+    }
+    if err := rows.Err(); err != nil {      // easy to forget, and important
+        return nil, fmt.Errorf("iterating orders: %w", err)
+    }
+    return orders, nil
+}
+```
+
+สามจุดที่มักพลาดได้ง่าย: `defer rows.Close()`, การเช็ค `rows.Err()` หลังจบลูป (การวนอ่านอาจล้มเหลวได้ระหว่างทาง) และการ initialize slice ด้วย `make(...)` เพื่อให้ผลลัพธ์ที่ว่างเปล่า marshal ออกมาเป็น `[]` แทนที่จะเป็น `null`
+
+pgx v5 ช่วยย่อ boilerplate ส่วนใหญ่นั้นได้:
+
+```go showLineNumbers
+rows, err := pool.Query(ctx, `SELECT id, user_id, quantity FROM orders WHERE user_id = $1`, userID)
+if err != nil {
+    return nil, err
+}
+orders, err := pgx.CollectRows(rows, pgx.RowToStructByName[Order])
+```
+
+## SQL injection — ใช้ placeholder เสมอ
+
+<Note title="ห้ามสร้าง SQL ด้วยการต่อ string เด็ดขาด" type="danger">
+  ```go
+  // CATASTROPHIC — never do this
+  query := "SELECT * FROM users WHERE email = '" + email + "'"
+  ```
+
+  ถ้า `email = "' OR '1'='1"` query นี้จะคืนค่า user ทุกคน input ที่แย่กว่านั้นสามารถลบตารางทิ้งหรือขโมยข้อมูลออกไปได้
+  นี่คือช่องโหว่ web ที่ถูกโจมตีมากที่สุดในประวัติศาสตร์ และป้องกันได้ทั้งหมด
+
+  ```go
+  // Safe — the value is sent separately from the SQL and is never parsed as SQL
+  pool.QueryRow(ctx, `SELECT * FROM users WHERE email = $1`, email)
+  ```
+
+  placeholder ไม่ใช่การ escape — ตัว query text กับ parameter จะถูกส่งแยกกัน ดังนั้น parameter จึงไม่มีวัน
+  เปลี่ยนความหมายของ statement ได้เลย ใช้ `$1`, `$2`, … **เสมอ** แม้แต่กับค่าที่คุณเชื่อว่าปลอดภัยแล้วก็ตาม
+</Note>
+
+ชื่อตารางและคอลัมน์ *ไม่สามารถ* parameterize ได้ ถ้าจำเป็นต้องเป็นค่า dynamic ให้ตรวจสอบกับ allowlist:
+
+```go showLineNumbers
+var allowedSort = map[string]string{
+    "created": "created_at",
+    "name":    "name",
+}
+col, ok := allowedSort[userInput]
+if !ok {
+    return nil, fmt.Errorf("invalid sort field")
+}
+query := fmt.Sprintf(`SELECT id, name FROM users ORDER BY %s`, col)  // safe: col is from the map
+```
+
+## การเขียนข้อมูลและ RETURNING
+
+```go showLineNumbers
+func CreateUser(ctx context.Context, pool *pgxpool.Pool, email, name string) (int64, error) {
+    var id int64
+    err := pool.QueryRow(ctx,
+        `INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id`,
+        email, name,
+    ).Scan(&id)
+    if err != nil {
+        return 0, fmt.Errorf("creating user: %w", err)
+    }
+    return id, nil
+}
+
+// When you don't need a value back, use Exec and check rows affected
+tag, err := pool.Exec(ctx, `UPDATE users SET name = $1 WHERE id = $2`, name, id)
+if err != nil {
+    return err
+}
+if tag.RowsAffected() == 0 {
+    return ErrUserNotFound
+}
+```
+
+### การจัดการ constraint violation
+
+ปล่อยให้ฐานข้อมูลบังคับใช้ความไม่ซ้ำกันและจัดการ error ที่เกิดขึ้น แทนที่จะเช็คล่วงหน้า:
+
+```go showLineNumbers
+var pgErr *pgconn.PgError
+if errors.As(err, &pgErr) && pgErr.Code == "23505" {   // unique_violation
+    return ErrEmailTaken
+}
+```
+
+## Transaction ใน Go
+
+```go showLineNumbers
+func PlaceOrder(ctx context.Context, pool *pgxpool.Pool, userID, productID int64) error {
+    tx, err := pool.Begin(ctx)
+    if err != nil {
+        return fmt.Errorf("beginning transaction: %w", err)
+    }
+    defer tx.Rollback(ctx) //nolint:errcheck // no-op if the tx already committed
+
+    var stock int
+    err = tx.QueryRow(ctx,
+        `UPDATE products SET stock = stock - 1
+         WHERE id = $1 AND stock > 0 RETURNING stock`, productID).Scan(&stock)
+    if errors.Is(err, pgx.ErrNoRows) {
+        return ErrOutOfStock
+    }
+    if err != nil {
+        return fmt.Errorf("decrementing stock: %w", err)
+    }
+
+    _, err = tx.Exec(ctx,
+        `INSERT INTO orders (user_id, product_id) VALUES ($1, $2)`, userID, productID)
+    if err != nil {
+        return fmt.Errorf("inserting order: %w", err)
+    }
+
+    return tx.Commit(ctx)
+}
+```
+
+<Note title="defer Rollback เสมอ" type="success">
+  `defer tx.Rollback(ctx)` ทันทีหลัง `Begin` รับประกันว่า transaction จะถูกปล่อยในทุกเส้นทาง — รวมถึง
+  early return และ panic ด้วย การ rollback transaction ที่ commit ไปแล้วจะคืนค่า `pgx.ErrTxClosed`
+  และไม่ทำอะไรเลย ดังนั้นการ defer มันไว้เสมอจึงปลอดภัย
+</Note>
+
+## ส่ง context เสมอ
+
+ทุกการเรียก pgx รับ `context.Context` ส่ง context ของ request เข้าไปเพื่อให้ request HTTP ที่ถูกยกเลิกหรือหมดเวลา
+ยกเลิก query ไปด้วย แทนที่จะปล่อยให้มันรันค้างอยู่:
+
+```go showLineNumbers
+func handler(w http.ResponseWriter, r *http.Request) {
+    ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+    defer cancel()
+
+    user, err := GetUser(ctx, pool, id)
+    // ...
+}
+```
+
+## Bulk insert
+
+```go showLineNumbers
+_, err := pool.CopyFrom(ctx,
+    pgx.Identifier{"orders"},
+    []string{"user_id", "product_id", "quantity"},
+    pgx.CopyFromSlice(len(orders), func(i int) ([]any, error) {
+        return []any{orders[i].UserID, orders[i].ProductID, orders[i].Quantity}, nil
+    }),
+)
+```
+
+`CopyFrom` ใช้ protocol `COPY` ของ PostgreSQL และเร็วกว่าการวนลูป insert อย่างมากสำหรับข้อมูลชุดใหญ่
+
+## แนวทางปฏิบัติที่ดี
+
+- **สร้าง pool เดียวตอน startup** แล้วใช้ร่วมกันทั้งแอป ห้ามเปิด connection ใหม่ต่อ request
+- **ใช้ placeholder `$1` เสมอ** ไม่มีข้อยกเว้น ห้ามต่อ string
+- **ส่ง `context.Context`** เข้าไปในทุก query
+- **เช็ค `pgx.ErrNoRows` แยกต่างหาก** และแปลงเป็น domain error
+- **`defer rows.Close()` และเช็ค `rows.Err()`** เมื่อวนอ่านข้อมูล
+- **`defer tx.Rollback(ctx)`** ทันทีหลัง `Begin`
+- **ทำ transaction ให้สั้นเข้าไว้** — ห้ามเรียก HTTP ภายใน transaction ([Transactions](/docs/sql-postgresql-basics/transactions#keep-transactions-short))
+- **ห่อ error พร้อมคำอธิบาย** ที่บอกว่า operation นั้นคืออะไร
+- **เก็บ `DATABASE_URL` ไว้ในตัวแปรสภาพแวดล้อม** ห้ามใส่ในโค้ดเด็ดขาด
+
+<CardGrid>
+  <Card
+    title="← Back to SQL / PostgreSQL Basics"
+    href="/docs/sql-postgresql-basics"
+    description="ไปยังหัวข้อใดก็ได้ในส่วนนี้"
+  />
+</CardGrid>

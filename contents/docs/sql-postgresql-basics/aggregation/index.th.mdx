@@ -1,0 +1,173 @@
+---
+title: Aggregation และ Grouping
+description: COUNT, SUM, AVG, GROUP BY และ HAVING — คำนวณค่าสรุปในฐานข้อมูลแทนที่จะทำใน application code
+keywords: ["group by", "having", "count", "sum", "avg", "aggregate functions", "sql aggregation"]
+---
+
+## Aggregate function
+
+aggregate จะย่อหลายแถวให้เหลือค่าเดียว:
+
+```sql showLineNumbers
+SELECT COUNT(*) FROM orders;
+SELECT SUM(quantity) FROM orders;
+SELECT AVG(price_cents) FROM products;
+SELECT MIN(created_at), MAX(created_at) FROM orders;
+```
+
+| Function | คืนค่า |
+|---|---|
+| `COUNT(*)` | จำนวนแถว |
+| `COUNT(col)` | จำนวนแถวที่ `col` **ไม่เป็น null** |
+| `COUNT(DISTINCT col)` | จำนวนค่าที่ไม่ซ้ำกันและไม่เป็น null |
+| `SUM(col)` | ผลรวม |
+| `AVG(col)` | ค่าเฉลี่ย |
+| `MIN` / `MAX` | ค่าน้อยที่สุด / มากที่สุด |
+
+<Note title="COUNT(*) กับ COUNT(column) ต่างกัน" type="warning">
+  `COUNT(*)` นับจำนวนแถว ส่วน `COUNT(phone)` นับเฉพาะแถวที่ `phone` ไม่เป็น null นั่นเป็นความแตกต่างที่มีประโยชน์ —
+  `COUNT(phone)` บอกได้ว่า user กี่คนที่กรอกเบอร์โทรศัพท์ไว้ — แต่ก็เป็นแหล่งบั๊กจริงๆ เมื่อคุณตั้งใจจะนับจำนวนแถว
+  เมื่อไม่แน่ใจ ให้ใช้ `COUNT(*)`
+</Note>
+
+โดยทั่วไป aggregate จะไม่นับรวม `NULL` ซึ่งส่งผลถึง `AVG` ด้วย:
+
+```sql showLineNumbers
+-- AVG divides by the count of NON-NULL values, not the row count.
+-- If you want nulls treated as zero, be explicit:
+SELECT AVG(COALESCE(score, 0)) FROM reviews;
+```
+
+## GROUP BY
+
+`GROUP BY` แบ่งแถวออกเป็นกลุ่มแล้วใช้ aggregate กับแต่ละกลุ่มแยกกัน:
+
+```sql showLineNumbers
+-- One row per status, with the count for each
+SELECT status, COUNT(*) AS order_count
+FROM orders
+GROUP BY status;
+```
+
+| status | order_count |
+|---|---|
+| pending | 12 |
+| paid | 45 |
+| shipped | 30 |
+
+<Mermaid chart="graph TD
+  R[All order rows] --> G{GROUP BY status}
+  G --> P[pending rows] --> PC[COUNT = 12]
+  G --> A[paid rows] --> AC[COUNT = 45]
+  G --> S[shipped rows] --> SC[COUNT = 30]" />
+
+### กฎของ GROUP BY
+
+ทุกคอลัมน์ใน `SELECT` ต้องอยู่ **ใน `GROUP BY`** หรือ **ถูกห่อด้วย aggregate** เท่านั้น PostgreSQL บังคับใช้กฎนี้อย่างเข้มงวด:
+
+```sql showLineNumbers
+-- Error: column "o.id" must appear in the GROUP BY clause
+-- or be used in an aggregate function
+SELECT status, id, COUNT(*) FROM orders GROUP BY status;
+
+-- Fine
+SELECT status, COUNT(*), MAX(id) FROM orders GROUP BY status;
+```
+
+เหตุผลง่ายๆ คือ: ถ้า 45 แถวมี status เดียวกัน แล้วฐานข้อมูลจะแสดง `id` ตัวไหนให้คุณดู? คุณต้องเลือกด้วย aggregate (`MAX(id)`) หรือไม่ก็ต้อง group ด้วยคอลัมน์นั้นด้วย
+
+### Group ด้วยหลายคอลัมน์
+
+```sql showLineNumbers
+SELECT user_id, status, COUNT(*) AS n
+FROM orders
+GROUP BY user_id, status
+ORDER BY user_id, status;
+```
+
+หนึ่งแถวต่อหนึ่ง combination ที่ไม่ซ้ำกัน
+
+### Group ควบคู่กับ join
+
+รูปแบบที่พบบ่อยในงานจริง — สรุปข้อมูลต่อ user หนึ่งคน:
+
+```sql showLineNumbers
+SELECT u.id, u.name, COUNT(o.id) AS order_count, SUM(o.quantity) AS total_items
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+GROUP BY u.id, u.name
+ORDER BY order_count DESC;
+```
+
+<Note title="ใช้ LEFT JOIN และ COUNT(column) สำหรับกรณีนับเป็นศูนย์" type="success">
+  มีสองรายละเอียดที่ทำให้ query นี้ถูกต้องสำหรับ user ที่ไม่มี order เลย:
+
+  - **`LEFT JOIN`** เก็บ user ที่ไม่มี order ที่ตรงกันไว้ (inner join จะตัดพวกเขาออกไป)
+  - **`COUNT(o.id)` ไม่ใช่ `COUNT(*)`** — หลัง left join ที่ไม่มีคู่ตรงกัน `o.id` จะเป็น `NULL`
+    ดังนั้น `COUNT(o.id)` จะให้ค่า `0` อย่างถูกต้อง ในขณะที่ `COUNT(*)` จะนับแถวที่เติม null เข้ามาแถวเดียวนั้น
+    และให้ค่าเป็น `1`
+</Note>
+
+## HAVING
+
+`WHERE` กรองแถว *ก่อน* การ group ส่วน `HAVING` กรองกลุ่ม *หลัง* การ group aggregate ใช้ได้เฉพาะใน `HAVING` เท่านั้น:
+
+```sql showLineNumbers
+-- Users with more than 5 orders
+SELECT user_id, COUNT(*) AS order_count
+FROM orders
+GROUP BY user_id
+HAVING COUNT(*) > 5;
+
+-- Error: aggregates are not allowed in WHERE
+SELECT user_id, COUNT(*) FROM orders WHERE COUNT(*) > 5 GROUP BY user_id;
+```
+
+ใช้ทั้งคู่ร่วมกัน — กรองแถวก่อน แล้วค่อยกรองกลุ่มที่ได้:
+
+```sql showLineNumbers
+SELECT user_id, COUNT(*) AS paid_orders, SUM(quantity) AS items
+FROM orders
+WHERE status = 'paid'              -- discard non-paid rows first
+GROUP BY user_id
+HAVING SUM(quantity) > 10          -- then keep only big-volume users
+ORDER BY items DESC
+LIMIT 10;
+```
+
+<Note title="กรองด้วย WHERE เมื่อทำได้" type="success">
+  `WHERE` รันก่อนการ group ดังนั้นมันช่วยลดจำนวนแถวที่ต้อง group ตั้งแต่แรก — ถูกกว่าการ group ทุกอย่าง
+  แล้วค่อยทิ้งกลุ่มทีหลัง เฉพาะเงื่อนไขที่ต้องพึ่ง aggregate จริงๆ เท่านั้นที่ควรอยู่ใน `HAVING`
+</Note>
+
+## Aggregate กับ FILTER
+
+ฟีเจอร์ของ PostgreSQL ที่สะอาดกว่าเทคนิค `CASE WHEN` สำหรับการนับแบบมีเงื่อนไข:
+
+```sql showLineNumbers
+SELECT
+    COUNT(*) AS total,
+    COUNT(*) FILTER (WHERE status = 'paid')      AS paid,
+    COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled
+FROM orders;
+```
+
+สแกนตารางแค่รอบเดียว ได้ค่านับหลายแบบ
+
+## แนวทางปฏิบัติที่ดี
+
+- **Aggregate ในฐานข้อมูล ไม่ใช่ใน Go** การดึง 100,000 แถวผ่านเครือข่ายมานับใน application code นั้นช้าและเปลืองหน่วยความจำ — `COUNT(*)` คืนแค่ตัวเลขเดียว
+- **ใช้ `COUNT(column)` หลัง `LEFT JOIN`** เมื่อค่าศูนย์ควรหมายถึงศูนย์จริงๆ
+- **ใส่ filter ที่ไม่ใช่ aggregate ไว้ใน `WHERE`, filter ที่เป็น aggregate ไว้ใน `HAVING`**
+- **Group ด้วย primary key** (`GROUP BY u.id, u.name`) แทนที่จะใช้คอลัมน์ที่ไม่ unique อย่างชื่อ — เพราะ user สองคนอาจมีชื่อเหมือนกันได้
+- **ระวังการทวีคูณของแถว** — การ join แบบ one-to-many ก่อน sum จะทำให้ผลรวมพองขึ้น ให้ aggregate ใน subquery ก่อน ถ้าคุณกำลัง join กับหลายตารางแบบ one-to-many พร้อมกัน
+
+Window function (running total, การจัดอันดับ, top-N ต่อกลุ่ม) คือขั้นถัดไปตามธรรมชาติ และอธิบายไว้ใน [PostgreSQL Advanced](/docs/postgresql-advanced)
+
+<CardGrid>
+  <Card
+    title="Modifying Data →"
+    href="/docs/sql-postgresql-basics/modifying-data"
+    description="INSERT, UPDATE, DELETE, upsert และ RETURNING"
+  />
+</CardGrid>

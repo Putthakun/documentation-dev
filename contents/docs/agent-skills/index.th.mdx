@@ -1,0 +1,187 @@
+---
+title: Agent Skill
+description: การแพ็กคำสั่งที่ใช้ซ้ำได้ไว้ในไฟล์ SKILL.md ที่ Claude ค้นพบและเรียกใช้เองได้
+keywords: ["claude code skills", "SKILL.md", "agent skills", "claude code slash command", "disable-model-invocation"]
+---
+
+## คืออะไร
+
+**skill** คือไดเรกทอรีที่มีไฟล์ `SKILL.md`: YAML frontmatter ที่บอก Claude ว่าเมื่อไหร่ควรใช้
+skill นี้ ตามด้วยคำสั่งแบบ markdown ว่าต้องทำอะไร นี่คือกลไกทั้งหมด — ไม่มี runtime พิเศษ ไม่มี
+ขั้นตอนลงทะเบียนใดๆ นอกจากวางไฟล์ให้ถูกที่
+
+แนวคิดนี้เหมือนกับการแยกคำสั่ง shell function ออกมาแทนที่จะพิมพ์คำสั่งเดิมซ้ำๆ: ถ้าคุณ paste
+checklist เดิม, ขั้นตอนหลายสเต็ปเดิม หรือ "เมื่อเจอ X ให้ทำ Y" ซ้ำๆ ในแชท นั่นแหละคือ skill
+มันยังเป็นทางแก้สำหรับ `CLAUDE.md` ที่โตเกินไปจนกลายเป็นขั้นตอนแทนที่จะเป็นข้อเท็จจริง —
+เนื้อหาของ `CLAUDE.md` จะอยู่ใน context ตลอดเวลา ในขณะที่เนื้อหาของ skill จะโหลดก็ต่อเมื่อถูก
+เรียกใช้จริงเท่านั้น ดังนั้นเอกสารอ้างอิงยาวๆ จึงไม่มีต้นทุนจนกว่าจะต้องใช้
+
+Claude Code skills เป็นไปตามมาตรฐานเปิด [Agent Skills](https://agentskills.io) ดังนั้น skill ที่
+เขียนสำหรับ Claude Code จึง (เกือบ) ย้ายไปใช้กับเครื่องมืออื่นที่ implement สเปกเดียวกันได้ Claude
+Code เพิ่มส่วนขยายของตัวเองไว้ด้านบน — การควบคุมการเรียกใช้, การรัน skill ใน subagent แยกต่างหาก,
+และการฉีด shell output แบบสดเข้าไปใน prompt — ซึ่งจะกล่าวถึงด้านล่าง
+
+<Note>
+  ตอนนี้ custom commands (`.claude/commands/*.md`) และ skills เป็นกลไกเดียวกันแล้ว ไฟล์ที่
+  `.claude/commands/deploy.md` และไฟล์ที่ `.claude/skills/deploy/SKILL.md` ทั้งคู่สร้างคำสั่ง
+  `/deploy` เหมือนกัน skills แค่เพิ่มรูปแบบไดเรกทอรีที่มีไฟล์ประกอบ (ทางเลือก) และฟิลด์
+  frontmatter ด้านล่างเพิ่มเข้ามา
+</Note>
+
+## วิธีใช้
+
+### เขียน skill ขึ้นมา
+
+```bash
+mkdir -p ~/.claude/skills/summarize-changes
+```
+
+```yaml title="~/.claude/skills/summarize-changes/SKILL.md"
+---
+description: Summarizes uncommitted changes and flags anything risky. Use when the user asks what changed, wants a commit message, or asks to review their diff.
+---
+
+## Current changes
+
+!`git diff HEAD`
+
+## Instructions
+
+Summarize the changes above in two or three bullet points, then list any risks — missing error
+handling, hardcoded values, tests that need updating. If the diff is empty, say so.
+```
+
+บรรทัด `` !`git diff HEAD` `` คือ **dynamic context injection**: Claude Code จะรันคำสั่ง shell
+นั้นก่อนที่เนื้อหา skill จะไปถึง Claude แล้วแทรก output จริงเข้าไป ทำให้คำสั่งที่ไปถึง Claude
+อ้างอิงกับ working tree จริงของคุณอยู่แล้ว สิ่งนี้ทำงานเฉพาะภายใน Claude Code เท่านั้น ไม่ใช่ใน
+ส่วนที่ portable ของสเปก
+
+จะถามเกี่ยวกับการเปลี่ยนแปลงของคุณด้วยภาษาธรรมดา (Claude จะโหลด skill ให้อัตโนมัติเพราะคำขอตรงกับ
+`description`) หรือจะเรียกใช้ตรงๆ ก็ได้
+
+```text
+/summarize-changes
+```
+
+### ขั้นตอนการค้นพบ (Discovery flow)
+
+<Mermaid chart="graph TD
+  U[Your message] --> C{Does it match a<br/>skill's description?}
+  C -->|Yes, auto-invocable| L[Full SKILL.md loads into context]
+  C -->|No match| N[Claude answers normally]
+  S[You type /skill-name] --> L
+  L --> R[Claude follows the instructions,<br/>content stays in context for the session]" />
+
+มีแค่ `description` (บวกกับ `when_to_use` ถ้าตั้งไว้) เท่านั้นที่อยู่ใน context ตลอดเวลา — นั่นคือ
+วิธีที่ Claude ตัดสินใจว่า skill นี้ *เกี่ยวข้อง* หรือไม่โดยไม่ต้องแบกรับเนื้อหาเต็มทุกเทิร์น
+markdown เต็มจะโหลดก็ต่อเมื่อ skill ถูกเรียกใช้จริง แล้วมันจะอยู่ในสถานะโหลดตลอดที่เหลือของ
+เซสชัน การเรียก skill เดิมซ้ำจะไม่โหลดซ้ำ
+
+### skills อยู่ที่ไหนบ้าง
+
+| ตำแหน่ง | Path | ขอบเขต |
+|---|---|---|
+| ส่วนตัว | `~/.claude/skills/<name>/SKILL.md` | ทุกโปรเจกต์ของคุณ |
+| โปรเจกต์ | `.claude/skills/<name>/SKILL.md` | repo นี้ แชร์ผ่าน git ได้ |
+| Plugin | `<plugin>/skills/<name>/SKILL.md` | ทุกที่ที่เปิดใช้ plugin นั้น |
+| องค์กร (Enterprise) | Managed settings | ทุกคนในองค์กร |
+
+skills ระดับโปรเจกต์จะถูกค้นพบโดยไล่ขึ้นจาก working directory ไปจนถึง repo root และไดเรกทอรี
+`.claude/skills/` ที่ซ้อนอยู่ (เช่นในแพ็กเกจของ monorepo) จะโหลดทันทีที่ Claude แตะไฟล์ในซับทรีนั้น
+เมื่อชื่อชนกัน enterprise จะชนะ personal และ personal จะชนะ project และทั้งคู่จะชนะ bundled skill
+ที่มีชื่อเดียวกัน
+
+<FileTree>
+  <Folder name="my-skill" defaultOpen>
+    <File name="SKILL.md" />
+    <File name="reference.md" />
+    <Folder name="scripts">
+      <File name="validate.sh" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+มีเพียง `SKILL.md` เท่านั้นที่จำเป็น ส่วนอื่นๆ — เอกสารอ้างอิง, เทมเพลต, สคริปต์ — เป็นน้ำหนัก
+เสริมที่ Claude จะอ่านหรือรันก็ต่อเมื่อคำสั่งของ skill เองชี้ไปที่มัน นี่คือวินัยแบบเดียวกับ
+"ให้ `SKILL.md` สั้นกว่า 500 บรรทัด แล้วดันรายละเอียดไปไว้ในไฟล์ที่ลิงก์ไว้" ที่ทำให้
+`description` ซึ่งอยู่ใน context ตลอดเวลามีต้นทุนต่ำ
+
+### ฟิลด์ใน Frontmatter
+
+ทุกฟิลด์เป็นตัวเลือก มีเพียง `description` เท่านั้นที่แนะนำจริงๆ เพราะมันคือสิ่งที่ขับเคลื่อนการ
+ค้นพบอัตโนมัติ
+
+| ฟิลด์ | หน้าที่ |
+|---|---|
+| `name` | ชื่อที่แสดงในรายการ ชื่อไดเรกทอรียังคงเป็นสิ่งที่คุณพิมพ์เพื่อเรียกใช้ สำหรับ skills ระดับ personal/project |
+| `description` | skill นี้ทำอะไรและใช้เมื่อไหร่ — นี่คือสิ่งที่ Claude นำมาเทียบกับ prompt ของคุณ |
+| `disable-model-invocation` | `true` หมายความว่ามีแต่คุณเท่านั้นที่เรียกได้ (`/name`) ไม่ใช่ Claude ที่เรียกเอง ใช้กับอะไรก็ตามที่มีผลข้างเคียง เช่น deploy, commit, ส่งข้อความ Slack |
+| `user-invocable` | `false` ซ่อนจากเมนู `/` — คือความรู้เบื้องหลังที่ Claude ควรรู้ แต่ไม่ใช่คำสั่งที่มีความหมายให้คุณรันเองด้วยมือ |
+| `allowed-tools` | เครื่องมือที่ได้รับอนุมัติล่วงหน้าโดยไม่ต้องขอ permission สำหรับเทิร์นที่เรียก skill นี้ จะรีเซ็ตเมื่อข้อความถัดไปของคุณ |
+| `disallowed-tools` | เครื่องมือที่ถูกถอดออกจากพูลขณะ skill กำลังทำงาน |
+| `argument-hint` | คำใบ้ autocomplete เช่น `[issue-number]` |
+| `model`, `effort` | Override เฉพาะเทิร์นที่ skill นี้ทำงาน |
+| `context: fork` | รันคำสั่งของ skill ใน subagent แยกแทนที่จะรันในบทสนทนาหลัก — ดู [Subagents](/docs/subagents) |
+| `paths` | Glob pattern; skill จะโหลดอัตโนมัติเฉพาะเมื่อ Claude กำลังทำงานกับไฟล์ที่ตรง |
+
+`$ARGUMENTS` (หรือ `$0`, `$1`, …, หรือกำหนดชื่อผ่าน `arguments` list) จะแทนที่ด้วยข้อความที่ตาม
+หลังชื่อ skill ตอนเรียกใช้ เช่น `/fix-issue 123` ทำให้ `$ARGUMENTS` ขยายเป็น `123`
+
+### Skills เทียบกับ slash commands, subagents และ MCP
+
+ทั้งสี่อย่างนี้มักถูกสับสนกันเพราะทับซ้อนกันในสิ่งที่มันทำได้ ไม่ใช่ใน *สิ่งที่มันเป็น*:
+
+| | จริงๆ แล้วมันคืออะไร | ใช้เมื่อ |
+|---|---|---|
+| **Skill** | ไฟล์ markdown ที่มีคำสั่ง โหลดเข้า context *ปัจจุบัน* | คุณอธิบายขั้นตอนหรือ convention เดิมซ้ำๆ อยู่เรื่อย |
+| **Slash command** | ตอนนี้รวมเป็นอันเดียวกับ skills แล้ว — skill คือสิ่งที่ custom command สร้าง | (เหมือนด้านบน; `.claude/commands/*.md` แบบเดิมยังใช้ได้อยู่) |
+| **Subagent** | context window *แยกต่างหาก* ที่มี system prompt และสิทธิ์เข้าถึงเครื่องมือของตัวเอง | งานนั้นจะทำให้บทสนทนาหลักท่วมไปด้วย output ที่คุณไม่ต้องใช้ซ้ำ |
+| **MCP server** | โปรเซสภายนอกที่เปิด tools/resources ผ่าน protocol | คุณต้องคุยกับระบบจริง — ฐานข้อมูล, API, ระบบ ticketing |
+
+skill สามารถ *ใช้* subagent (`context: fork`) เพื่อแยก context ได้ และ subagent ก็สามารถ
+*โหลดล่วงหน้า* skills เป็นเอกสารอ้างอิงผ่านฟิลด์ `skills:` ใน frontmatter ของมันได้ — ทั้งสอง
+ทำงานประกอบกันมากกว่าจะแข่งกัน ไม่มีตัวไหนแทนที่ MCP ได้: skill บอกวิธีใช้ MCP tool ให้ดีได้
+แต่มันเรียกระบบภายนอกด้วยตัวเองโดยไม่มี MCP ไม่ได้
+
+## แนวปฏิบัติที่ดี
+
+- **ใส่ trigger ไว้ต้นๆ ของ `description`** Claude จะเทียบ prompt ของคุณกับฟิลด์นี้ก่อนที่จะอ่าน
+  เนื้อหาเลย — description ที่คลุมเครือแปลว่า skill นั้นจะไม่ถูกเรียกอัตโนมัติเลย
+- **ใส่ `disable-model-invocation: true` กับอะไรก็ตามที่มีผลข้างเคียง** คุณไม่อยากให้ Claude
+  ตัดสินใจ deploy เองเพราะคิดว่าโค้ดพร้อมแล้ว สงวนการเรียกอัตโนมัติไว้กับ skills ที่ปลอดภัยแม้จะถูก
+  เรียกแบบเดา
+- **ให้ `SKILL.md` สั้น; ดันรายละเอียดไปไฟล์ที่ลิงก์ไว้** เนื้อหาจะค้างอยู่ใน context ตลอดที่เหลือ
+  ของเซสชันเมื่อโหลดแล้ว — ทุกบรรทัดคือต้นทุนที่เกิดซ้ำ ไม่ใช่ต้นทุนครั้งเดียว
+- **เขียนคำสั่งที่ใช้ได้ตลอด ไม่ใช่ขั้นตอนครั้งเดียว** Claude Code ไม่อ่านไฟล์ซ้ำในเทิร์นถัดๆ ไป
+  ถ้าคำแนะนำควรใช้ได้ตลอดทั้งงาน ก็เขียนให้สื่อแบบนั้น
+- **จำกัด `allowed-tools` ให้แคบและเป็นคำสั่งจริง** เช่น
+  `Bash(git add *) Bash(git commit *)` ไม่ใช่ให้สิทธิ์แบบกว้างๆ `Bash` — นี่คือแบบสิทธิ์ที่คุณควร
+  ระแวงเวลารีวิว skill ของ*คนอื่น* ซึ่งเป็นหัวข้อของหน้าถัดไป
+
+## ตัวอย่างจริง
+
+skill ระดับโปรเจกต์ที่รัน lint suite ของโปรเจกต์แล้วรายงานเฉพาะที่ fail — มีประโยชน์เพราะ
+output ของ lint เต็มๆ อาจยาวหลายร้อยบรรทัดที่คุณไม่อยากให้รกบทสนทนาหลัก:
+
+```yaml title=".claude/skills/lint-check/SKILL.md"
+---
+name: lint-check
+description: Runs the project's linter and reports only the failures. Use before committing or when asked to check code quality.
+allowed-tools: Bash(golangci-lint run *)
+context: fork
+---
+
+Run `golangci-lint run ./...` and report only the failing lint rules, grouped by file. If
+everything passes, say so in one line — don't restate the command output.
+```
+
+เนื่องจากตั้ง `context: fork` ไว้ skill นี้จะรันใน subagent ของตัวเอง: output ดิบจาก linter
+(ซึ่งอาจใหญ่มาก) จะไม่แตะบทสนทนาหลักเลย มีแค่สรุปเท่านั้นที่ส่งกลับมา
+
+<CardGrid>
+  <Card
+    title="Skills Ecosystem (skills.sh) →"
+    href="/docs/skills-ecosystem"
+    description="การติดตั้ง ประเมิน และเชื่อถือ skills จากบุคคลที่สาม แทนที่จะเขียนเองอย่างเดียว"
+  />
+</CardGrid>

@@ -1,0 +1,343 @@
+---
+title: Software Architecture Patterns
+description: รูปแบบสถาปัตยกรรมที่ใช้กันทั่วไปสำหรับระบบ backend — layered, hexagonal, event-driven และการตัดสินใจระหว่าง monolith กับ microservices
+keywords: ["software architecture", "layered architecture", "hexagonal architecture", "clean architecture", "ports and adapters", "event-driven", "monolith", "microservices"]
+---
+
+## รูปแบบสถาปัตยกรรมคืออะไร
+
+**design pattern** แก้ปัญหาภายในไฟล์หรือ package เดียว ส่วน **architectural pattern** ตัดสินใจว่าทั้งระบบจะถูกแบ่งอย่างไร: ชิ้นส่วนระดับบนสุดมีอะไรบ้าง dependency ชี้ไปทิศทางไหน และเส้นแบ่งขอบเขต (boundary) อยู่ตรงไหน
+
+คุณมีโอกาสตัดสินใจเรื่องนี้แบบต้นทุนต่ำได้แค่ครั้งเดียว — ตอนเริ่มต้น การเปลี่ยน design pattern ใช้เวลาแค่บ่ายเดียว แต่การเปลี่ยนสถาปัตยกรรมใช้เวลาเป็นไตรมาส ความไม่สมมาตรนี้เองที่ทำให้คุ้มค่าที่จะคิดให้รอบคอบแม้กับ service เล็ก ๆ
+
+คำถามที่มีประโยชน์ไม่ใช่ "pattern ไหนดีที่สุด" แต่เป็น **"ระบบนี้เผชิญแรงกดดัน (forces) แบบไหนจริง ๆ"** — ขนาดทีม อัตราการเปลี่ยนแปลง ข้อจำกัดของการ deploy และสิ่งนี้ต้องอยู่ไปนานแค่ไหน
+
+## Layered (n-tier) architecture
+
+ค่าเริ่มต้น และเป็นจุดเริ่มต้นที่ถูกต้องสำหรับ service ส่วนใหญ่ โค้ดถูกแบ่งเป็นชั้น (layer) ในแนวนอน และ **dependency จะชี้ลงล่างเท่านั้น**
+
+<Mermaid chart="graph TD
+  H[Handler / Transport<br/>HTTP, gRPC, CLI] --> S[Service / Business logic]
+  S --> R[Repository / Data access]
+  R --> D[(PostgreSQL)]" />
+
+ใน Go เรื่องนี้แม็ปตรงกับ package:
+
+<FileTree>
+  <Folder name="cmd" defaultOpen>
+    <Folder name="api">
+      <File name="main.go" />
+    </Folder>
+  </Folder>
+  <Folder name="internal" defaultOpen>
+    <Folder name="handler">
+      <File name="user.go" />
+    </Folder>
+    <Folder name="service">
+      <File name="user.go" />
+    </Folder>
+    <Folder name="repository">
+      <File name="user_postgres.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+แต่ละ layer มีหน้าที่หนึ่งเดียว:
+
+| Layer | รับผิดชอบ | ต้องไม่รู้เรื่อง |
+|---|---|---|
+| Handler | ถอดรหัส request, ตรวจสอบรูปแบบ input, เขียน response และ status code | SQL, กฎทางธุรกิจ |
+| Service | กฎทางธุรกิจ, การ orchestrate, transaction | HTTP status code, `*http.Request` |
+| Repository | คุยกับฐานข้อมูล, แปลง row เป็น struct | กฎทางธุรกิจ |
+
+```go showLineNumbers title="internal/handler/user.go"
+func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
+    id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+    if err != nil {
+        http.Error(w, "invalid id", http.StatusBadRequest)
+        return
+    }
+
+    user, err := h.svc.GetUser(r.Context(), id)      // hands off to the service
+    if errors.Is(err, service.ErrUserNotFound) {
+        http.Error(w, "not found", http.StatusNotFound)
+        return
+    }
+    if err != nil {
+        http.Error(w, "internal error", http.StatusInternalServerError)
+        return
+    }
+
+    json.NewEncoder(w).Encode(user)
+}
+```
+
+<Note title="เส้นแบ่ง layer ที่สำคัญจริง ๆ" type="success">
+  กฎเดียวที่คุ้มค่าที่จะยึดถือเคร่งครัดคือ **type ของ `net/http` ต้องไม่หลุดเข้าไปถึง service layer** ถ้า
+  `GetUser` รับ `*http.Request` เป็นพารามิเตอร์ คุณจะเรียกมันจาก CLI, cron job หรือ
+  test ไม่ได้เลยถ้าไม่สร้าง fake request ปลอมขึ้นมา ให้ส่ง `context.Context` และค่าธรรมดา ๆ แทน
+</Note>
+
+**จุดที่พังลง:** ทุกอย่างจบลงด้วยการพึ่งพาฐานข้อมูล เพราะ repository อยู่ล่างสุด การเปลี่ยน PostgreSQL ไปเป็นอย่างอื่น หรือการทดสอบ service โดยไม่มีฐานข้อมูล จะยากลำบาก นี่คือปัญหาที่ pattern ถัดไปแก้
+
+## Hexagonal architecture (ports & adapters)
+
+แนวคิดเดียวกับ layering แต่ลูกศร dependency ถูก **กลับด้านที่ขอบ**: business logic หลักอยู่ตรงกลางและไม่พึ่งพาสิ่งภายนอกใด ๆ ทุกอย่างข้างนอก — HTTP, PostgreSQL, Stripe, Kafka — เสียบเข้ามาหามัน
+
+ใกล้เคียงกับ **Clean Architecture** แต่ไม่ใช่สิ่งเดียวกัน Hexagonal (Ports & Adapters) เป็นของ Alistair Cockburn ซึ่งบอกแค่ว่า "core ต้องไม่พึ่งพาอะไรภายนอกมัน" ส่วน Clean Architecture เป็นแนวคิดที่ตามมาทีหลังของ Robert C. Martin ซึ่งยังคงกฎเดิมไว้และเพิ่มเติมโดยกำหนด concentric layers ภายใน core — entities แล้วตามด้วย use cases แล้วตามด้วย adapters ทั้งสองยึดกฎ dependency เดียวกัน แต่ Clean มีความเข้มงวดมากกว่า
+
+<Mermaid chart="graph LR
+  HTTP[HTTP handler] --> P1[Port: UserService]
+  CLI[CLI command] --> P1
+  P1 --> CORE[Domain core<br/>business rules]
+  CORE --> P2[Port: UserStore interface]
+  P2 --> PG[Adapter: Postgres]
+  P2 --> MEM[Adapter: in-memory fake]" />
+
+**port** คือ interface **adapter** คือการ implement แบบเป็นรูปธรรมของมัน ใน Go เรื่องนี้แทบไม่มีต้นทุนเลย เพราะ interface ถูก satisfy โดยปริยาย (implicit) และเป็นของฝั่งผู้ใช้งาน (consumer):
+
+```go showLineNumbers title="internal/user/service.go"
+package user
+
+// Port: the core declares only what it needs. No import of pgx anywhere here.
+type Store interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+    Create(ctx context.Context, u *User) error
+}
+
+type Service struct {
+    store Store
+}
+
+func NewService(store Store) *Service {
+    return &Service{store: store}
+}
+
+func (s *Service) Register(ctx context.Context, email, name string) (*User, error) {
+    if !strings.Contains(email, "@") {
+        return nil, ErrInvalidEmail        // a business rule, not an HTTP concern
+    }
+    u := &User{Email: email, Name: name}
+    if err := s.store.Create(ctx, u); err != nil {
+        return nil, fmt.Errorf("creating user: %w", err)
+    }
+    return u, nil
+}
+```
+
+```go showLineNumbers title="internal/postgres/user.go"
+package postgres
+
+// Adapter: knows about pgx, satisfies user.Store implicitly.
+type UserStore struct{ pool *pgxpool.Pool }
+
+func (s *UserStore) GetByID(ctx context.Context, id int64) (*user.User, error) {
+    // ... pgx query
+}
+```
+
+การ wiring เกิดขึ้นแค่ครั้งเดียว ใน `main.go`:
+
+```go showLineNumbers title="cmd/api/main.go"
+pool, err := db.New(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+store := postgres.NewUserStore(pool)       // pick the adapter
+svc := user.NewService(store)              // inject it into the core
+handler := httpapi.NewUserHandler(svc)     // drive the core from HTTP
+```
+
+ผลตอบแทนเป็นรูปธรรม: การทดสอบ `Service` ต้องการแค่ struct ที่มีสอง method ไม่ต้องมีฐานข้อมูล
+
+```go showLineNumbers
+type fakeStore struct{ users map[int64]*user.User }
+
+func (f *fakeStore) Create(ctx context.Context, u *user.User) error {
+    f.users[u.ID] = u
+    return nil
+}
+// ... and a real unit test, no Docker required
+```
+
+<Note title="อย่าเพิ่งสร้าง hexagon เต็มรูปแบบตั้งแต่วันแรก" type="warning">
+  Hexagonal architecture มีต้นทุนจริง: package เยอะขึ้น interface เยอะขึ้น
+  ต้องอ่าน indirection มากขึ้น สำหรับ service ที่มี datastore เดียวและไม่มีแผนจะเปลี่ยน
+  layered architecture บวกกับ `Store` interface ตัวเดียวก็ให้ประโยชน์ถึง 80% แล้ว
+  ค่อยเพิ่ม port ตอนที่มี implementation ตัวที่สอง หรือมี test ที่ต้องการ fake — ไม่ใช่ก่อนหน้านั้น ดู
+  [SOLID Principles](/docs/solid-principles) สำหรับกฎเบื้องหลังเรื่องนี้
+</Note>
+
+## Event-driven architecture
+
+แทนที่ service A จะเรียก service B ตรง ๆ A **publish event** และไม่สนว่าใครจะเป็นผู้บริโภค (consumer) มัน
+
+<Mermaid chart="graph LR
+  O[Order service] -->|OrderPlaced| B[(Message broker<br/>Kafka / NATS / SQS)]
+  B --> E[Email service]
+  B --> I[Inventory service]
+  B --> A[Analytics service]" />
+
+เปรียบเทียบสองรูปแบบนี้:
+
+<Tabs defaultValue="direct" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="direct">Direct calls</TabsTrigger>
+    <TabsTrigger value="events">Event-driven</TabsTrigger>
+  </TabsList>
+  <TabsContent value="direct">
+```go showLineNumbers
+func (s *OrderService) Place(ctx context.Context, o *Order) error {
+    if err := s.store.Save(ctx, o); err != nil {
+        return err
+    }
+    // Every new consumer means editing this function.
+    if err := s.email.SendConfirmation(ctx, o); err != nil {
+        return err                       // an email outage now fails the order
+    }
+    if err := s.inventory.Reserve(ctx, o); err != nil {
+        return err
+    }
+    return nil
+}
+```
+  </TabsContent>
+  <TabsContent value="events">
+```go showLineNumbers
+func (s *OrderService) Place(ctx context.Context, o *Order) error {
+    if err := s.store.Save(ctx, o); err != nil {
+        return err
+    }
+    // Publish once. Consumers subscribe independently.
+    return s.events.Publish(ctx, OrderPlaced{
+        OrderID: o.ID,
+        UserID:  o.UserID,
+        Total:   o.Total,
+    })
+}
+```
+  </TabsContent>
+</Tabs>
+
+**สิ่งที่ได้:** order service เลิกต้องรู้จัก email กับ inventory การเพิ่ม analytics consumer ไม่ต้องแก้อะไรที่นี่เลย email provider ที่ช้าก็ไม่ทำให้ checkout ช้าลงอีกต่อไป
+
+**สิ่งที่ต้องจ่าย:** ระบบกลายเป็น eventually consistent และวิเคราะห์ได้ยากขึ้นมาก คำถาม "ทำไม user คนนี้ไม่ได้รับอีเมล" ตอนนี้ครอบคลุมสาม service กับ broker คุณต้องมี idempotent consumer เพราะ at-least-once delivery หมายความว่า event *จะ* มาถึงซ้ำสอง
+
+<Note title="การ publish กับการ save ไม่ใช่ atomic" type="danger">
+  ในโค้ดข้างบน ถ้า `store.Save` สำเร็จแต่ `events.Publish` ล้มเหลวตามมา order ก็ยังคงมีอยู่
+  แต่ไม่มีอะไรที่ downstream รู้เรื่องเลย transaction ของฐานข้อมูลกับ broker เป็นสองระบบแยกกัน
+  — transaction ปกติครอบคลุมทั้งสองอย่างพร้อมกันไม่ได้
+
+  วิธีแก้มาตรฐานคือ **transactional outbox**: เขียน event ลงตาราง `outbox` ใน
+  transaction *เดียวกัน* กับ order แล้วให้ process แยกต่างหาก publish row จากตารางนั้น
+  อย่าเพิ่งใช้ event จนกว่าจะพร้อมรับมือกับเรื่องนี้
+</Note>
+
+## Monolith vs microservices
+
+การตัดสินใจที่คนมักทำผิดบ่อยที่สุด และมักผิดไปในทิศทางเดียวกัน
+
+| | Modular monolith | Microservices |
+|---|---|---|
+| การ deploy | artifact เดียว | หนึ่งต่อ service |
+| การเรียกระหว่าง module | function call — เร็ว, type-checked, transactional | network call — ล้มเหลวได้, timeout ได้, ต้อง retry |
+| ความสอดคล้องของข้อมูล | ฐานข้อมูลเดียว, transaction จริง | กระจาย, eventually consistent |
+| การ debug | stack trace เดียว | ต้องใช้ distributed tracing |
+| การ scale | ทั้งแอปไปด้วยกัน | ต่อ service |
+| เหมาะกับทีมแบบไหน | ทีมเดียวหรือไม่กี่ทีม | หลายทีมที่ต้อง deploy อิสระกัน |
+| ต้นทุนที่แท้จริง | วินัยในการรักษาขอบเขต | infra, observability, on-call, CI/CD |
+
+<Note title="เริ่มด้วย modular monolith" type="success">
+  Microservices แก้ปัญหาระดับ **องค์กร** — ให้หลายทีม deploy ได้โดยไม่ต้องประสานงานกัน —
+  ด้วยการจ่ายต้นทุนทางเทคนิคที่สูง ถ้าคุณไม่มีปัญหาระดับองค์กรแบบนั้น คุณกำลังจ่ายต้นทุน
+  โดยไม่ได้อะไรตอบแทน
+
+  monolith ที่มีขอบเขต package ภายในสะอาดจะให้ความเป็น modular ส่วนใหญ่โดยไม่ต้องมี network
+  และแยก monolith ที่จัดระเบียบดีอยู่แล้วออกในภายหลังนั้นง่ายกว่าการรวม microservices
+  ที่แบ่งเส้นผิดตั้งแต่แรกมาก
+</Note>
+
+## ตัวอย่างจริง: ประกอบร่างเข้าด้วยกัน
+
+Order service เล็ก ๆ ใน Go แบบ hexagonal, deployable เดียว:
+
+<FileTree>
+  <Folder name="cmd" defaultOpen>
+    <Folder name="api">
+      <File name="main.go" />
+    </Folder>
+  </Folder>
+  <Folder name="internal" defaultOpen>
+    <Folder name="order" defaultOpen>
+      <File name="order.go" />
+      <File name="service.go" />
+      <File name="errors.go" />
+    </Folder>
+    <Folder name="postgres">
+      <File name="order_store.go" />
+    </Folder>
+    <Folder name="httpapi">
+      <File name="order_handler.go" />
+      <File name="router.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+```go showLineNumbers title="internal/order/service.go"
+package order
+
+type Store interface {
+    Save(ctx context.Context, o *Order) error
+    GetByID(ctx context.Context, id int64) (*Order, error)
+}
+
+type Publisher interface {
+    Publish(ctx context.Context, event any) error
+}
+
+type Service struct {
+    store Store
+    events Publisher
+}
+
+func (s *Service) Place(ctx context.Context, userID, productID int64, qty int) (*Order, error) {
+    if qty <= 0 {
+        return nil, ErrInvalidQuantity
+    }
+
+    o := &Order{UserID: userID, ProductID: productID, Quantity: qty, Status: StatusPending}
+    if err := s.store.Save(ctx, o); err != nil {
+        return nil, fmt.Errorf("saving order: %w", err)
+    }
+
+    // Simplified deliberately: this drops the event if the broker is down.
+    // Production code writes OrderPlaced into an outbox table inside the same
+    // transaction as the order — see the outbox note above.
+    if err := s.events.Publish(ctx, OrderPlaced{OrderID: o.ID}); err != nil {
+        slog.Error("publishing OrderPlaced", "order_id", o.ID, "err", err)
+    }
+    return o, nil
+}
+```
+
+สังเกตว่า `internal/order` import อะไรบ้าง: ไม่มีอะไรจาก `net/http` ไม่มีอะไรจาก `pgx` package นั้นคือ core ทุกอย่างที่เหลือคือ adapter รอบ ๆ มัน และแต่ละตัวสามารถแทนที่ได้โดยไม่ต้องแตะกฎทางธุรกิจ
+
+## Best practices
+
+- **เริ่มแบบ layered แล้วค่อยดึง port ออกมาเมื่อต้องการ** สถาปัตยกรรมที่ไม่จำเป็นคือต้นทุนที่ไม่มีประโยชน์
+- **รักษา dependency ให้ชี้ทิศทางเดียว** Handler → service → repository ห้าม repository import handler เด็ดขาด
+- **อย่าให้ type ของ transport ข้ามขอบเขต** ห้ามมี `*http.Request` ใน service ห้ามมี `pgx.Rows` ใน handler
+- **นิยาม interface ใน package ฝั่งผู้ใช้งาน (consumer)** ให้เล็กและเจาะจงตามการใช้งาน — นี่คือสิ่งที่ทำให้ port มีต้นทุนต่ำใน Go ([Interfaces](/docs/golang-fundamentals/interfaces))
+- **Wire dependency ใน `main.go`** ไม่ใช่ผ่าน global state หรือ `init()`
+- **เลือก modular monolith ก่อน** จนกว่าจะมีเหตุผลด้านองค์กรบังคับให้แยก service ออกจากกัน
+- **อย่า publish event จนกว่าจะแก้ปัญหา outbox แล้ว**
+- **เขียนขอบเขตไว้เป็นลายลักษณ์อักษร** สถาปัตยกรรมที่ไม่มีใครตกลงร่วมกันจะเสื่อมกลายเป็นไม่มีสถาปัตยกรรมภายในไม่กี่เดือน
+
+<CardGrid>
+  <Card
+    title="Design Patterns →"
+    href="/docs/design-patterns"
+    description="Creational, structural และ behavioral patterns เขียนในแบบที่ Go ใช้จริง"
+  />
+</CardGrid>

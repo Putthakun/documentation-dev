@@ -1,0 +1,161 @@
+---
+title: Pointer
+description: pointer คืออะไรใน Go, ทำไมมันถึงมีอยู่โดยไม่มี pointer arithmetic และเมื่อไหร่ที่คุณควรใช้จริง ๆ
+keywords: ["golang pointers", "dereference", "nil pointer", "pass by value", "new"]
+---
+
+## ทุกอย่างใน Go ถูกส่งแบบ pass by value
+
+นี่คือสิ่งที่สำคัญที่สุดที่ต้องเข้าใจ เมื่อคุณส่งอะไรก็ตามเข้าไปใน function Go จะ copy มัน เสมอ
+
+```go showLineNumbers
+func increment(n int) {
+    n++   // modifies the copy
+}
+
+count := 5
+increment(count)
+fmt.Println(count) // still 5
+```
+
+Pointer คือวิธีที่คุณ opt out จากพฤติกรรมนี้: แทนที่จะส่ง value คุณส่ง **memory address** ของมันไป ทำให้ function เข้าถึงต้นฉบับได้
+
+<Mermaid chart="graph LR
+  V[count<br/>value: 5] -->|address 0xc000018030| P[p *int<br/>holds: 0xc000018030]
+  P -->|*p dereferences| V" />
+
+## Syntax
+
+มี operator สองตัว และมันเป็นภาพสะท้อนกัน:
+
+- `&x` — "address of x" ให้ pointer กับคุณ
+- `*p` — "value at p" dereference pointer
+
+```go showLineNumbers
+count := 5
+p := &count        // p is of type *int
+
+fmt.Println(p)     // 0xc000018030 — an address
+fmt.Println(*p)    // 5 — the value it points to
+
+*p = 10            // write through the pointer
+fmt.Println(count) // 10 — the original changed
+```
+
+ตอนนี้เวอร์ชัน function ทำงานได้แล้ว:
+
+```go showLineNumbers
+func increment(n *int) {
+    *n++
+}
+
+count := 5
+increment(&count)
+fmt.Println(count) // 6
+```
+
+<Note title="* หมายถึงสองสิ่งที่ต่างกัน" type="warning">
+  ใน **type** (`var p *int`) `*` หมายถึง "pointer to" ใน **expression** (`*p = 10`) มันหมายถึง
+  "dereference" สัญลักษณ์เดียวกัน แต่คนละด้านของการดำเนินการ — นี่คือความสับสนที่พบบ่อยในช่วงแรก
+</Note>
+
+## Zero value คือ nil
+
+```go showLineNumbers
+var p *int          // nil
+fmt.Println(p == nil) // true
+
+fmt.Println(*p)     // PANIC: runtime error: invalid memory address
+```
+
+การ dereference nil pointer จะทำให้โปรแกรมของคุณ crash นี่คือ runtime panic ที่พบบ่อยที่สุดใน Go และมักมาจาก error ที่ไม่ได้เช็ค:
+
+```go showLineNumbers
+user, err := findUser(id)
+// forgetting to check err here...
+fmt.Println(user.Name)  // panics if findUser returned (nil, err)
+```
+
+<Note title="เช็ค error ก่อนใช้ value เสมอ" type="danger">
+  เมื่อ function return `(*T, error)` pointer นั้นไม่มีความหมายถ้า error ไม่ใช่ nil เช็ค
+  `err` ก่อนทุกครั้ง — นิสัยเดียวนี้ป้องกัน nil-pointer panic ส่วนใหญ่ได้
+</Note>
+
+## Pointer ไปยัง struct
+
+Go จะ dereference struct pointer ให้อัตโนมัติเมื่อเข้าถึง field ดังนั้นคุณแทบไม่เคยต้องเขียน `(*u).Name`:
+
+```go showLineNumbers
+type User struct {
+    Name string
+    Age  int
+}
+
+u := &User{Name: "alice", Age: 30}
+
+fmt.Println(u.Name)     // Go does this for you
+fmt.Println((*u).Name)  // equivalent, but nobody writes this
+
+u.Age = 31              // modifies the original
+```
+
+## new เทียบกับ &T{}
+
+```go showLineNumbers
+p := new(int)        // pointer to a zero-valued int
+u := &User{}         // pointer to a zero-valued User — preferred
+u2 := &User{Name: "bob"}  // with field values
+```
+
+`new` แทบไม่ค่อยถูกใช้ในทางปฏิบัติ ใช้ `&T{...}` แทน — มันยืดหยุ่นกว่าและอ่านง่ายกว่า
+
+## ไม่มี pointer arithmetic
+
+ต่างจาก C คุณทำ `p++` เพื่อเดินไปตาม memory ไม่ได้ Go ตัดสิ่งนี้ออกไปโดยตั้งใจ: มันเป็นต้นเหตุของ bug ด้าน memory-safety ส่วนใหญ่ และ slice ก็ครอบคลุม use case ที่ถูกต้องอยู่แล้ว เมื่อรวมกับ garbage collection สิ่งนี้หมายความว่า pointer ของ Go ปลอดภัย — คุณสร้าง dangling pointer หรืออ่านเลยขอบเขตของ allocation ไม่ได้
+
+## เมื่อไหร่ที่คุณควรใช้ pointer?
+
+| ใช้ pointer เมื่อ... | ใช้ value เมื่อ... |
+|---|---|
+| Function ต้องแก้ไขข้อมูลของผู้เรียกใช้ | ข้อมูลเป็น read-only ใน function |
+| Struct มีขนาดใหญ่และการ copy มีต้นทุนสูง | Struct มีขนาดเล็ก (มีไม่กี่ field) |
+| `nil` เป็น state ที่มีความหมาย ("not found", "not set") | มี value ที่ถูกต้องเสมอ |
+| Type มี method ที่เป็น pointer-receiver (เช่น mutex) | Type เป็น value type ธรรมดา |
+
+```go showLineNumbers
+// Pointer: needs to modify, and nil means "not found"
+func FindUser(id string) (*User, error)
+
+// Value: small, read-only
+func FormatName(u User) string
+
+// Pointer: contains a sync.Mutex, must never be copied
+type Server struct {
+    mu sync.Mutex
+    // ...
+}
+func NewServer() *Server
+```
+
+<Note title="Slice, map และ channel มี pointer ในตัวอยู่แล้ว" type="success">
+  คุณไม่จำเป็นต้องใช้ `*[]int` หรือ `*map[string]int` slice header และ map value อ้างอิงถึงข้อมูล
+  ที่แชร์กันอยู่ภายในอยู่แล้ว ดังนั้นการส่งมันแบบ value ก็ทำให้ function แก้ไข *เนื้อหา* ข้างในได้อยู่แล้ว
+  (คุณจะต้องใช้ `*[]int` เฉพาะกรณีหายากที่ function ต้องเปลี่ยน slice header ของผู้เรียกใช้เอง — เช่น
+  การ append ในแบบที่ผู้เรียกใช้มองเห็นได้)
+</Note>
+
+## แนวทางปฏิบัติที่ดี
+
+- **อย่าใช้ pointer เป็นค่าเริ่มต้น** Value เรียบง่ายกว่า แชร์ข้าม goroutine ได้อย่างปลอดภัย และมักเร็วกว่าสำหรับ struct ขนาดเล็ก
+- **เช็ค error ทุกครั้งก่อน dereference** value ที่ return มาพร้อมกับมัน
+- **สม่ำเสมอภายใน type เดียวกัน** — ถ้า method ใด method หนึ่งต้องใช้ pointer receiver ให้ใช้ pointer receiver กับทุก method (พูดถึงใน [Structs & Methods](/docs/golang-fundamentals/structs-methods))
+- **อย่า copy struct ที่มี `sync.Mutex` เด็ดขาด** ส่งมันเป็น pointer เสมอ; `go vet` จะจับสิ่งนี้ให้
+- **ใช้ `nil` อย่างตั้งใจ** ในฐานะ "ไม่มี" และเขียน document ไว้ — field `*string` ใน struct เป็นวิธีที่สมเหตุสมผลในการแยก "empty string" ออกจาก "ไม่ได้ระบุ" เมื่อ parse JSON
+
+<CardGrid>
+  <Card
+    title="Structs & Methods →"
+    href="/docs/golang-fundamentals/structs-methods"
+    description="custom types, methods และ value vs pointer receivers"
+  />
+</CardGrid>

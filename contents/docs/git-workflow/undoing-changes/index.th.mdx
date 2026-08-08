@@ -1,0 +1,99 @@
+---
+title: การย้อนกลับการเปลี่ยนแปลง
+description: reset, revert, restore และ stash — สี่วิธีของ Git ในการยกเลิกบางสิ่ง และควรใช้แบบไหนเมื่อไหร่
+keywords: ["git reset", "git revert", "git restore", "git stash", "undo commit"]
+---
+
+Git มีคำสั่ง "undo" หลายตัวที่หน้าตาคล้ายกันแต่ทำงานต่างกันมาก การเลือกผิดคือสาเหตุที่คนทำงานหาย — หน้านี้คือแผนที่ช่วยให้คุณเลือกถูก
+
+## ตารางตัดสินใจแบบเร็ว
+
+| ฉันต้องการ... | คำสั่ง |
+|---|---|
+| ทิ้งการเปลี่ยนแปลงที่ยังไม่ commit ในไฟล์ | `git restore <file>` |
+| เอาไฟล์ออกจาก staging (เก็บการแก้ไขไว้) | `git restore --staged <file>` |
+| เก็บงานที่ยังไม่ commit ไว้ชั่วคราว | `git stash` |
+| ยกเลิก commit ล่าสุด แต่เก็บการเปลี่ยนแปลงไว้ | `git reset --soft HEAD~1` |
+| ลบ commit ล่าสุดและการเปลี่ยนแปลงทั้งหมดทิ้งไปเลย | `git reset --hard HEAD~1` |
+| ยกเลิก commit ที่ push/แชร์ไปแล้ว | `git revert <commit>` |
+
+## `git restore` — การเปลี่ยนแปลงใน working directory
+
+```bash showLineNumbers
+git restore file.go              # ทิ้งการแก้ไขที่ยังไม่ commit ของ file.go กลับไปเป็น commit ล่าสุด
+git restore --staged file.go      # เอา file.go ออกจาก staging (ยกเลิก git add) แต่ยังเก็บการแก้ไขไว้
+```
+
+<Note title="Danger" type="danger">
+  `git restore <file>` จะทิ้งการเปลี่ยนแปลงที่ยังไม่ commit อย่างถาวรโดยไม่มีทางย้อนกลับ
+  ตรวจสอบ `git status`/`git diff` ให้ดีก่อนรัน
+</Note>
+
+## `git stash` — เก็บงานไว้ชั่วคราว
+
+มีประโยชน์เมื่อคุณต้องสลับ branch แต่ยังไม่พร้อม commit:
+
+```bash showLineNumbers
+git stash                 # เก็บการเปลี่ยนแปลงที่ยังไม่ commit ทั้งหมด
+git stash list             # ดูรายการ stash ที่เก็บไว้
+git stash pop               # นำ stash ล่าสุดกลับมาใช้ และลบออกจากรายการ
+git stash apply             # นำ stash ล่าสุดกลับมาใช้ แต่ยังเก็บไว้ในรายการ
+git stash drop               # ลบ stash โดยไม่นำมาใช้
+```
+
+## `git reset` — ย้าย pointer ของ branch
+
+`reset` ย้าย pointer ของ branch ปัจจุบันไปยัง commit อื่น มันมีสามโหมด ต่างกันตรงผลกระทบต่อ working directory และ staging area:
+
+```bash showLineNumbers
+git reset --soft HEAD~1   # ย้าย pointer ถอยหลัง 1 commit; เก็บการเปลี่ยนแปลงไว้ใน staged
+git reset --mixed HEAD~1  # (ค่าเริ่มต้น) ย้าย pointer ถอยหลัง; เก็บการเปลี่ยนแปลงไว้ แต่ไม่ staged
+git reset --hard HEAD~1   # ย้าย pointer ถอยหลัง; ลบการเปลี่ยนแปลงทั้งหมด working dir ตรงกับ commit นั้น
+```
+
+<Mermaid chart="graph TD
+  subgraph before [Before: 3 commits]
+  A1((A)) --> B1((B)) --> C1((C, HEAD))
+  end
+  subgraph after [After: git reset --soft HEAD~1]
+  A2((A)) --> B2((B, HEAD))
+  S[C's changes: staged]
+  B2 -.-> S
+  end" />
+
+<Note title="Danger" type="danger">
+  `git reset --hard` ลบทั้ง commit และการเปลี่ยนแปลงที่ยังไม่ commit อย่างถาวร ถ้า commit
+  เหล่านั้นถูก push ไปแล้ว การ reset ในเครื่องจะไม่ลบมันออกจาก remote — คุณต้อง force push
+  ซึ่งมีความเสี่ยงของมันเอง (ดู [Working with Remotes](/docs/git-workflow/remotes))
+</Note>
+
+## `git revert` — วิธี undo ที่ปลอดภัยสำหรับประวัติที่ใช้ร่วมกัน
+
+แทนที่จะลบ commit ออก `revert` จะสร้าง **commit ใหม่** ที่ทำการเปลี่ยนแปลงตรงข้ามกับ commit เดิม:
+
+```bash showLineNumbers
+git revert a1b2c3d
+```
+
+```text showLineNumbers
+Before: A - B - C (bad commit) - D
+After:  A - B - C - D - C' (reverts C)
+```
+
+เพราะมันเพิ่มเข้าไปในประวัติแทนที่จะเขียนทับ `revert` จึงปลอดภัยเสมอที่จะใช้บน branch ที่ใช้ร่วมกันอย่าง `main` — ไม่มีใครที่ประวัติ local จะพัง
+
+## แล้วควรใช้อันไหนจริงๆ?
+
+<Note title="Best practice" type="success">
+  กฎง่ายๆ: **ยังอยู่ใน local และยังไม่ได้ push → ใช้ `reset` ได้เลย** **push/แชร์ไปแล้ว →
+  ใช้ `revert` เสมอ ห้าม `reset --hard` แล้ว force push เด็ดขาด** กฎเดียวนี้ป้องกันหายนะจากการ
+  "undo" ได้เกือบทั้งหมด
+</Note>
+
+<CardGrid>
+  <Card
+    title="Git Workflow Strategies →"
+    href="/docs/git-workflow/workflow-strategies"
+    description="วิธีที่ทีมจัดโครงสร้าง branch ในระดับใหญ่: Feature Branch, Git Flow, Trunk-Based"
+  />
+</CardGrid>

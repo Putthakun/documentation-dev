@@ -1,0 +1,187 @@
+---
+title: Array, Slice และ Map
+description: collections ที่มีมาให้ในตัวของ Go, การทำงานจริง ๆ ของ slice ภายใต้ผิวนอก และกับดักเรื่อง aliasing ที่ทุกคนต้องเจอ
+keywords: ["golang slice", "array", "map", "append", "len", "cap", "backing array", "make"]
+---
+
+## Arrays — ขนาดคงที่ ไม่ค่อยได้ใช้โดยตรง
+
+ความยาวของ array เป็นส่วนหนึ่งของ type มัน: `[3]int` และ `[4]int` คือคนละ type กัน Array เป็น **value** — การ assign คือการ copy มัน
+
+```go showLineNumbers
+var a [3]int          // [0 0 0]
+b := [3]string{"x", "y", "z"}
+c := [...]int{1, 2, 3} // compiler counts the elements
+
+d := b     // full copy, not a reference
+d[0] = "changed"
+fmt.Println(b[0]) // still "x"
+```
+
+คุณจะแทบไม่ประกาศ array โดยตรงเลย มันมีอยู่หลัก ๆ เพื่อเป็น storage ที่ slice ชี้ไปหา
+
+## Slices — สิ่งที่คุณจะใช้จริง ๆ
+
+Slice คือ view ขนาดปรับได้ที่มองเข้าไปใน array ภายใต้ผิวนอกมันคือ struct เล็ก ๆ ที่มีสาม field:
+
+<Mermaid chart="graph LR
+  subgraph Slice Header
+  P[ptr]
+  L[len = 3]
+  C[cap = 5]
+  end
+  P --> A
+  subgraph Backing Array
+  A[10] --- B[20] --- C2[30] --- D[unused] --- E[unused]
+  end" />
+
+- **ptr** — ตำแหน่งที่ slice เริ่มต้นใน backing array
+- **len** — จำนวน element ที่มันมีอยู่ตอนนี้ (`len(s)`)
+- **cap** — จำนวนที่มันเก็บได้ก่อนที่จะต้องขยาย (`cap(s)`)
+
+```go showLineNumbers
+var s []int              // nil slice — len 0, cap 0, but usable
+s = append(s, 1)
+
+t := []int{1, 2, 3}      // literal
+u := make([]int, 0, 10)  // len 0, cap 10 — preallocated
+v := make([]int, 5)      // len 5, cap 5 — [0 0 0 0 0]
+```
+
+### append และการขยายขนาด
+
+`append` return **slice header ตัวใหม่** — คุณต้อง assign ผลลัพธ์เสมอ:
+
+```go showLineNumbers
+s = append(s, 4)            // always reassign
+s = append(s, 5, 6, 7)      // multiple values
+s = append(s, other...)     // append another slice
+```
+
+เมื่อ `len` จะเกิน `cap` Go จะจอง backing array ใหม่ที่ใหญ่ขึ้น (ประมาณเท่าตัว) แล้ว copy ทุกอย่างไปที่นั่น นี่คือเหตุผลที่การ preallocate สำคัญใน hot path:
+
+```go showLineNumbers
+// Good: one allocation instead of repeated grow-and-copy
+results := make([]User, 0, len(rows))
+for _, row := range rows {
+    results = append(results, toUser(row))
+}
+```
+
+### การ slice
+
+```go showLineNumbers
+s := []int{0, 1, 2, 3, 4, 5}
+
+s[1:4]   // [1 2 3]  — from index 1 up to (not including) 4
+s[:3]    // [0 1 2]
+s[2:]    // [2 3 4 5]
+s[:]     // whole slice
+```
+
+<Note title="Slices แชร์ backing array กัน" type="danger">
+  การ slice **ไม่** copy ข้อมูล — slice ทั้งสองตัวชี้ไปที่ memory เดียวกัน การแก้ไขตัวหนึ่ง
+  จะมองเห็นได้ผ่านอีกตัว:
+
+  ```go
+  original := []int{1, 2, 3, 4, 5}
+  part := original[1:3]   // [2 3]
+  part[0] = 99
+  fmt.Println(original)   // [1 99 3 4 5] — original changed!
+  ```
+
+  หลักการเดียวกันนี้ใช้กับ `append` เมื่อยังมี capacity เหลืออยู่: มันจะเขียนลงใน array ที่แชร์กันอยู่
+  และสามารถเขียนทับข้อมูลที่ slice อื่นมองเห็นได้แบบเงียบ ๆ เมื่อคุณต้องการความเป็นอิสระ ให้ copy อย่างชัดเจน:
+
+  ```go
+  independent := make([]int, len(part))
+  copy(independent, part)
+  ```
+</Note>
+
+สิ่งนี้ยังส่งผลต่อ function argument ด้วย: การส่ง slice จะ copy แค่ *header* ไม่ใช่ข้อมูล — ดังนั้น function สามารถแก้ไข element ของคุณได้ แต่การ append ข้างในนั้นจะไม่ปรากฏให้ผู้เรียกใช้เห็น
+
+## Maps
+
+Key-value store ที่ไม่มีลำดับ Key ต้อง comparable ได้ (ห้ามใช้ slice, map หรือ function เป็น key)
+
+```go showLineNumbers
+// Always create with make or a literal — a nil map panics on write
+m := make(map[string]int)
+n := map[string]int{"alice": 30, "bob": 25}
+
+m["alice"] = 30          // set
+age := m["alice"]        // get
+delete(m, "alice")       // delete
+count := len(m)          // size
+```
+
+### Key ที่หายไปและ comma-ok idiom
+
+การอ่าน key ที่ไม่มีอยู่จะ return zero value ของ value type นั้น ไม่ใช่ error — ดังนั้นคุณจะแยกไม่ออกระหว่าง "ไม่มี" กับ "มีแต่เป็นศูนย์" หากไม่ใช้ค่าที่ return ตัวที่สอง:
+
+```go showLineNumbers
+age := m["nobody"]          // 0 — but does the key exist?
+
+age, ok := m["nobody"]
+if !ok {
+    // definitely not present
+}
+```
+
+### ลำดับการ iterate เป็นแบบสุ่ม
+
+```go showLineNumbers
+for key, value := range m {
+    // Order differs on EVERY run — this is deliberate, to stop
+    // anyone depending on it.
+}
+
+// If you need deterministic order, sort the keys:
+keys := make([]string, 0, len(m))
+for k := range m {
+    keys = append(keys, k)
+}
+sort.Strings(keys)
+for _, k := range keys {
+    fmt.Println(k, m[k])
+}
+```
+
+### Sets
+
+Go ไม่มี set type ในตัว idiom คือใช้ map ที่มี value เป็น empty struct ซึ่งใช้ zero byte:
+
+```go showLineNumbers
+seen := make(map[string]struct{})
+seen["alice"] = struct{}{}
+
+if _, ok := seen["alice"]; ok {
+    // present
+}
+```
+
+<Note title="Map ไม่ปลอดภัยสำหรับใช้แบบ concurrent" type="warning">
+  การอ่านพร้อมกันหลาย goroutine นั้นปลอดภัย แต่การอ่านและเขียนพร้อมกันจะทำให้โปรแกรมของคุณ crash
+  ด้วย fatal error "concurrent map writes" ที่ `recover` จับไม่ได้ ป้องกัน map ด้วย
+  `sync.RWMutex` `sync.Map` มีให้ใช้เช่นกันแต่เป็นเครื่องมือเฉพาะทาง — มันคุ้มค่าแค่สองกรณีที่ระบุไว้ใน
+  docs ของมัน: key ที่เขียนครั้งเดียวแล้วอ่านหลายครั้ง หรือ goroutine ที่ทำงานกับ key คนละชุดกัน
+  สำหรับ map ที่เขียนบ่อยมาก `RWMutex` ธรรมดามักจะเร็วกว่า รันเทสต์ด้วย `go test -race` เพื่อจับปัญหานี้
+</Note>
+
+## แนวทางปฏิบัติที่ดี
+
+- **Preallocate ด้วย `make([]T, 0, n)`** เมื่อคุณรู้คร่าว ๆ ว่าจะเพิ่ม element กี่ตัว
+- **Assign ผลลัพธ์ของ `append` กลับเสมอ**
+- **Copy อย่างชัดเจน** เมื่อ slice ต้องไม่แชร์ memory กับต้นทางของมัน — โดยเฉพาะก่อนที่จะเก็บมันไว้ใช้ในระยะยาว
+- **Return empty slice ไม่ใช่ nil** จาก function ที่ผู้เรียกใช้จะ marshal เป็น JSON (`nil` จะ encode เป็น `null` ส่วน empty จะ encode เป็น `[]`) นอกจากนั้น `nil` ก็ใช้ได้และเป็น idiomatic
+- **ใช้ comma-ok idiom** เมื่อไหร่ก็ตามที่ "ไม่มี" และ "เป็นศูนย์" มีความหมายต่างกัน
+- **อย่าพึ่งพาลำดับการ iterate ของ map** เรียง key เมื่อลำดับมีความสำคัญ
+
+<CardGrid>
+  <Card
+    title="Pointers →"
+    href="/docs/golang-fundamentals/pointers"
+    description="pointer คืออะไร และเมื่อไหร่ที่คุณควรใช้จริง ๆ"
+  />
+</CardGrid>

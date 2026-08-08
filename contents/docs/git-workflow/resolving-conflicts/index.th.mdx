@@ -1,0 +1,96 @@
+---
+title: การแก้ Merge Conflict
+description: วิธีจัดการ Git merge conflict แบบเป็นขั้นเป็นตอน ไม่ตื่นตระหนก
+keywords: ["merge conflict", "git conflict", "conflict markers", "git merge --abort"]
+---
+
+Conflict เกิดขึ้นเมื่อ Git ไม่สามารถตัดสินใจเองได้ว่าจะรวมการเปลี่ยนแปลงสองชุดเข้าด้วยกันอย่างไร — โดยส่วนใหญ่เป็นเพราะทั้งสอง branch แก้ไข **บรรทัดเดียวกัน** ของ **ไฟล์เดียวกัน** มันไม่ใช่ error และไม่ใช่สัญญาณว่าคุณทำอะไรผิด — เป็นเรื่องปกติที่คาดหวังได้ในการทำงานร่วมกัน
+
+## Conflict หน้าตาเป็นอย่างไร
+
+เมื่อ `git merge` หรือ `git pull` เจอ conflict มันจะหยุดและทำเครื่องหมายไฟล์ที่ได้รับผลกระทบ:
+
+```text showLineNumbers
+func RateLimit(r *http.Request) bool {
+<<<<<<< HEAD
+    return tokenBucket.Allow(r.RemoteAddr)
+=======
+    return slidingWindow.Allow(r.RemoteAddr)
+>>>>>>> feature/rate-limiting
+}
+```
+
+- ตั้งแต่ `<<<<<<< HEAD` ลงไปถึง `=======` — คือเวอร์ชันบน **branch ปัจจุบันของคุณ**
+- ตั้งแต่ `=======` ลงไปถึง `>>>>>>> feature/rate-limiting` — คือเวอร์ชันจาก **branch ที่กำลังถูก merge เข้ามา**
+
+## แก้ปัญหาแบบเป็นขั้นเป็นตอน
+
+<Step>
+  <StepItem title="ดูว่าอะไรที่ conflict">
+    รัน `git status` — ไฟล์ที่มี conflict จะอยู่ในหัวข้อ "Unmerged paths"
+
+    ```bash
+    git status
+    ```
+  </StepItem>
+
+  <StepItem title="เปิดไฟล์ที่ conflict ทีละไฟล์">
+    อ่านทั้งสองฝั่ง แล้วตัดสินใจว่าจะเก็บฝั่งไหน หรือรวมทั้งสองฝั่งเข้าด้วยกันเอง
+    ลบบรรทัดเครื่องหมาย `<<<<<<<`, `=======`, `>>>>>>>` ออก — สิ่งเหล่านี้ไม่ใช่โค้ดที่ใช้งานได้จริง
+    และห้ามหลงเหลืออยู่ในไฟล์
+  </StepItem>
+
+  <StepItem title="Stage ไฟล์ที่แก้แล้ว">
+    เมื่อไฟล์ไม่มีเครื่องหมาย conflict เหลืออยู่และดูถูกต้องแล้ว ให้ stage มัน — นี่คือการบอก
+    Git ว่าคุณแก้ conflict ของไฟล์นั้นเสร็จแล้ว
+
+    ```bash
+    git add internal/ratelimit/limiter.go
+    ```
+  </StepItem>
+
+  <StepItem title="ทำซ้ำกับทุกไฟล์ที่ conflict แล้วจบกระบวนการ">
+    เมื่อไฟล์ที่ conflict ทุกไฟล์ถูก stage แล้ว ให้ทำขั้นตอนสุดท้ายให้เสร็จ
+
+    ```bash
+    git status              # ยืนยันว่าไม่มี "Unmerged paths" เหลืออยู่
+    git commit               # สำหรับ merge conflict — Git จะเติม merge commit message ให้อัตโนมัติ
+    # หรือถ้าเกิดขึ้นระหว่าง rebase:
+    git rebase --continue
+    ```
+  </StepItem>
+</Step>
+
+## ยกเลิกทั้งหมด
+
+ถ้า conflict ดูสับสนหรือคุณอยากเริ่มใหม่:
+
+```bash showLineNumbers
+git merge --abort      # ยกเลิก merge ที่กำลังดำเนินอยู่ กลับสู่สถานะก่อน merge
+git rebase --abort     # ยกเลิก rebase ที่กำลังดำเนินอยู่ กลับสู่สถานะก่อน rebase
+```
+
+ทั้งสองคำสั่งปลอดภัยอย่างสมบูรณ์ — มันแค่ยกเลิกการทำงานที่ค้างอยู่โดยไม่มีผลข้างเคียงใดๆ
+
+## ลดความถี่ในการเกิด conflict
+
+- **Pull/rebase `main` เข้า branch ของคุณบ่อยๆ** — conflict เล็กๆ ที่เกิดบ่อยๆ แก้ง่ายกว่า conflict ก้อนใหญ่ที่เกิดตอน merge branch ที่ค้างมาสองสัปดาห์
+- **ให้ branch มีอายุสั้นและโฟกัสเรื่องเดียว** — ยิ่งสอง branch แตะไฟล์เดียวกันน้อยเท่าไหร่ conflict ก็ยิ่งน้อยเท่านั้น
+- **สื่อสาร** — ถ้าคุณกับเพื่อนร่วมทีมกำลังจะแก้ไฟล์/ฟังก์ชันเดียวกัน ข้อความ Slack สั้นๆ 30 วินาทีช่วยหลีกเลี่ยง conflict ได้ทั้งหมด
+
+## เคล็ดลับเรื่องเครื่องมือ
+
+editor ส่วนใหญ่ (VS Code, GoLand) จะแสดงเครื่องหมาย conflict พร้อมปุ่ม **"Accept Current" / "Accept Incoming" / "Accept Both"** แบบ inline — มักจะเร็วและปลอดภัยกว่าการแก้ด้วยมือในตัวแก้ไขข้อความธรรมดา `git mergetool` ก็สามารถเปิดเครื่องมือ 3-way diff ที่ตั้งค่าไว้ได้เช่นกัน
+
+<Note title="Best practice" type="success">
+  หลังจากแก้ conflict เสร็จแล้ว ให้รัน test อีกครั้งก่อน commit เสมอ conflict ที่ถูกแก้แบบ
+  "ดูเป็นเหตุเป็นผล" (ไม่มีเครื่องหมายเหลือ) ก็ยังอาจผิดในเชิงการทำงานได้ — วิธีเดียวที่รู้แน่คือรันโค้ดจริง
+</Note>
+
+<CardGrid>
+  <Card
+    title="Undoing Changes →"
+    href="/docs/git-workflow/undoing-changes"
+    description="reset, revert, restore และ stash — รู้ว่าควรใช้อันไหน"
+  />
+</CardGrid>

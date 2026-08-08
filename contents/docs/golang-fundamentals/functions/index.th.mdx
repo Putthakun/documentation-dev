@@ -1,0 +1,198 @@
+---
+title: ฟังก์ชัน
+description: ค่าที่ return ได้หลายค่า, named returns, variadic parameters, function ในฐานะ value และ closures
+keywords: ["golang functions", "multiple return values", "variadic", "closure", "named returns"]
+---
+
+## Syntax พื้นฐาน
+
+Type จะมาหลังชื่อ — ตรงข้ามกับภาษาตระกูล C:
+
+```go showLineNumbers
+func add(a int, b int) int {
+    return a + b
+}
+
+// Consecutive params of the same type can share it:
+func add(a, b int) int {
+    return a + b
+}
+
+// No return value:
+func log(msg string) {
+    fmt.Println(msg)
+}
+```
+
+## ค่าที่ return ได้หลายค่า
+
+นี่คือหนึ่งใน feature ที่โดดเด่นที่สุดของ Go และเป็นเหตุผลที่ Go ไม่ต้องการ exception convention คือ `(result, error)`:
+
+```go showLineNumbers
+func divide(a, b float64) (float64, error) {
+    if b == 0 {
+        return 0, errors.New("division by zero")
+    }
+    return a / b, nil
+}
+
+result, err := divide(10, 2)
+if err != nil {
+    return err
+}
+
+// Discard a value you don't need:
+result, _ := divide(10, 2)
+```
+
+<Note title="Error อยู่ท้ายสุดเสมอ" type="success">
+  ตาม convention `error` จะเป็นค่าที่ return ตัวสุดท้ายเสมอ และคุณต้องเช็คมันทันที การ return
+  `(value, error)` แล้วเพิกเฉยต่อ error ด้วย `_` มักจะเป็น bug ที่รอวันเกิดขึ้นเสมอ — `go
+  vet` และ linter ส่วนใหญ่จะ flag มันให้
+</Note>
+
+idiom "comma ok" มีรูปแบบเดียวกัน ใช้สำหรับการค้นหาที่อาจไม่พบข้อมูล:
+
+```go showLineNumbers
+value, ok := myMap["key"]
+if !ok {
+    // key was not present
+}
+```
+
+## Named return values
+
+คุณสามารถตั้งชื่อค่าที่ return ได้ พวกมันจะถูกประกาศล่วงหน้าเป็นตัวแปรที่มี zero value และ `return` เปล่า ๆ จะ return ค่าปัจจุบันของพวกมัน:
+
+```go showLineNumbers
+func split(sum int) (x, y int) {
+    x = sum * 4 / 9
+    y = sum - x
+    return   // naked return — returns x and y
+}
+```
+
+<Note title="ใช้ named return แต่พอประมาณ" type="warning">
+  Naked return ทำให้อ่านยากขึ้นในโค้ดที่ยาวกว่าไม่กี่บรรทัด — ผู้อ่านต้องเลื่อนกลับไปดูว่ากำลัง
+  return อะไรอยู่ จุดเดียวที่ named return คุ้มค่าจริง ๆ คือการแก้ไข error ใน deferred function:
+
+  ```go
+  func doWork() (err error) {
+      defer func() {
+          if r := recover(); r != nil {
+              err = fmt.Errorf("recovered: %v", r)
+          }
+      }()
+      // ...
+  }
+  ```
+
+  แม้กระทั่งตอนนั้น ก็ยังควรเลือกใช้ `return x, y` แบบชัดเจนมากกว่า naked `return`
+</Note>
+
+## Variadic parameters
+
+`...T` รับ argument ได้จำนวนเท่าไหร่ก็ได้ โดยจะได้รับมาในรูปแบบ slice:
+
+```go showLineNumbers
+func sum(nums ...int) int {
+    total := 0
+    for _, n := range nums {
+        total += n
+    }
+    return total
+}
+
+sum(1, 2, 3)      // 6
+sum()             // 0 — nums is an empty slice
+ 
+// Spread an existing slice with ...
+values := []int{1, 2, 3}
+sum(values...)
+```
+
+Variadic parameter ต้องอยู่ตัวสุดท้ายเสมอ นี่คือวิธีที่ `fmt.Println` และ `append` ทำงาน
+
+## Function คือ value
+
+Function เป็น first-class: คุณสามารถ assign มันให้ตัวแปร ส่งมันเป็น argument หรือ return มันได้:
+
+```go showLineNumbers
+// As a variable
+var op func(int, int) int
+op = add
+fmt.Println(op(2, 3))
+
+// As a parameter — this is how sorting works
+sort.Slice(users, func(i, j int) bool {
+    return users[i].Age < users[j].Age
+})
+
+// A named function type makes signatures readable
+type HandlerFunc func(w http.ResponseWriter, r *http.Request)
+```
+
+## Closures
+
+Closure คือ function ที่ capture ตัวแปรจาก scope ที่มันถูกประกาศไว้ ตัวแปรที่ถูก capture จะถูกแชร์ ไม่ใช่การ copy:
+
+```go showLineNumbers
+func counter() func() int {
+    count := 0
+    return func() int {
+        count++      // captures and mutates the outer count
+        return count
+    }
+}
+
+next := counter()
+fmt.Println(next()) // 1
+fmt.Println(next()) // 2
+fmt.Println(next()) // 3
+```
+
+การใช้งานจริงที่พบบ่อยที่สุดคือ middleware — function ที่ห่อ handler แล้ว return handler ตัวใหม่:
+
+```go showLineNumbers title="middleware.go"
+func withLogging(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        next(w, r)
+        log.Printf("%s %s took %v", r.Method, r.URL.Path, time.Since(start))
+    }
+}
+
+http.HandleFunc("/users", withLogging(handleUsers))
+```
+
+<Note title="bug ของการ capture ตัวแปรใน loop" type="danger">
+  ใน **Go 1.21 และเก่ากว่า** ตัวแปร `for` loop จะถูกใช้ซ้ำในทุกรอบ ทำให้ closure ที่ถูกสร้างขึ้น
+  ใน loop ทั้งหมด capture ตัวแปร*เดียวกัน*และเห็นค่าสุดท้ายของมัน:
+
+  ```go
+  for _, v := range items {
+      go func() { fmt.Println(v) }()  // pre-1.22: often prints the last item repeatedly
+  }
+  ```
+
+  **Go 1.22 เปลี่ยนแปลงพฤติกรรมนี้** — ตัวแปร loop จะแยกเป็นของแต่ละรอบแล้ว และโค้ดนี้จะทำงานตามที่คาดหวัง
+  หากคุณทำงานกับ codebase เก่า (หรือเห็น fix แบบเก่าอย่าง `v := v` อยู่ต้น loop body) นี่คือสิ่งที่มันมีไว้แก้
+  เช็ค `go` directive ใน `go.mod` ของคุณ: พฤติกรรมใหม่จะใช้เมื่อมันระบุ
+  `go 1.22` หรือใหม่กว่า
+</Note>
+
+## แนวทางปฏิบัติที่ดี
+
+- **Return `(value, error)` และเช็ค error ทันที** อย่าเลื่อนการจัดการ error ออกไป
+- **ทำให้ function สั้นและมีจุดประสงค์เดียว** ถ้าคุณต้องเขียน comment เพื่ออธิบายบางส่วน ส่วนนั้นน่าจะควรเป็น function ของตัวเอง
+- **รับ interface และ return concrete type** — เป็นแนวทางของ Go ที่ถูกใช้กันอย่างแพร่หลาย เพราะทำให้ function ยืดหยุ่นสำหรับผู้เรียกใช้ อ่านเพิ่มเติมได้ใน [Interfaces](/docs/golang-fundamentals/interfaces)
+- **หลีกเลี่ยง naked return** นอกเหนือจาก function ที่สั้นมาก ๆ
+- **ส่ง `context.Context` เป็น parameter ตัวแรก** สำหรับอะไรก็ตามที่ทำ I/O เพื่อให้ผู้เรียกใช้ยกเลิกมันได้: `func FetchUser(ctx context.Context, id string) (*User, error)`
+
+<CardGrid>
+  <Card
+    title="Arrays, Slices & Maps →"
+    href="/docs/golang-fundamentals/collections"
+    description="collections ของ Go — และกับดักเรื่อง slice ที่ทุกคนต้องเจอ"
+  />
+</CardGrid>

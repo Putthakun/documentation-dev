@@ -1,0 +1,95 @@
+---
+title: Rebase กับ Merge
+description: สองวิธีที่ต่างกันในการรวมประวัติของ branch, ข้อแลกเปลี่ยน และควรใช้แบบไหนเมื่อไหร่
+keywords: ["git rebase", "git merge", "interactive rebase", "linear history"]
+---
+
+ทั้ง `merge` และ `rebase` ต่างก็รวมการเปลี่ยนแปลงจาก branch หนึ่งเข้ากับอีก branch หนึ่ง — แต่ให้รูปร่างของประวัติที่แตกต่างกันมาก
+
+## Merge: เก็บประวัติไว้ตามที่เกิดขึ้นจริง
+
+```bash showLineNumbers
+git switch main
+git merge feature/rate-limiting
+```
+
+<Mermaid chart="graph LR
+  subgraph Merge
+  A1((A)) --> B1((B)) --> C1((C))
+  A1 --> D1((D)) --> E1((E))
+  C1 --> M((Merge commit))
+  E1 --> M
+  end" />
+
+Merge สร้าง **merge commit** ใหม่ที่เชื่อมปลายทั้งสอง branch เข้าด้วยกัน commit เดิมบนทั้งสอง branch ยังคงอยู่เหมือนเดิมทุกประการ ไม่มีอะไรถูกเขียนทับใหม่ — ซึ่งทำให้ merge ปลอดภัยเสมอ แม้บน branch ที่ใช้งานร่วมกัน/สาธารณะ
+
+## Rebase: เล่นซ้ำ commit ของคุณบน branch อื่น
+
+```bash showLineNumbers
+git switch feature/rate-limiting
+git rebase main
+```
+
+<Mermaid chart="graph LR
+  subgraph Rebase
+  A2((A)) --> B2((B)) --> C2((C)) --> D2((D'))--> E2((E'))
+  end" />
+
+Rebase นำ commit ของ branch คุณออกไปชั่วคราว เล่นซ้ำ commit ใหม่ของ `main` แล้วนำ commit ของคุณกลับมาใส่ทีละอัน **ต่อท้าย** — ราวกับว่าคุณแตก branch ออกมาจาก `main` เวอร์ชันล่าสุดตั้งแต่แรก ผลลัพธ์คือประวัติเป็นเส้นตรง ไม่มี merge commit สังเกตว่า commit จะได้ **hash ใหม่** (`D'`, `E'`) — นี่คือการเขียนประวัติทับใหม่
+
+## กฎทองของ rebase
+
+<Note title="อย่า rebase ประวัติที่ใช้ร่วมกัน" type="danger">
+  ให้ rebase เฉพาะ branch ที่มีอยู่ **บนเครื่องคุณเท่านั้น** และไม่มีใครดึงไปใช้ เพราะ
+  rebase เขียน hash ของ commit ใหม่ การ rebase branch ที่คนอื่นก็ทำงานอยู่ด้วยจะทำให้ประวัติ
+  local ของพวกเขาพังในครั้งถัดไปที่ pull
+</Note>
+
+## Interactive rebase
+
+`git rebase -i` ให้คุณแก้ไข, เรียงลำดับใหม่, squash หรือลบ commit ก่อนที่มันจะถูกใช้จริง — มักใช้เพื่อทำความสะอาด feature branch ที่รกก่อนเปิด pull request
+
+```bash showLineNumbers
+git rebase -i HEAD~3
+```
+
+จะเปิด editor แสดงรายการ commit 3 อันล่าสุดของคุณ:
+
+```text showLineNumbers
+pick a1b2c3d feat: add rate limiter skeleton
+pick e4f5g6h fix typo
+pick i7j8k9l feat: add tests
+
+# Commands:
+# p, pick   = use commit as-is
+# r, reword = use commit, edit the message
+# s, squash = combine with previous commit, keep both messages
+# f, fixup  = combine with previous commit, discard this message
+# d, drop   = remove commit entirely
+```
+
+การเปลี่ยน `pick` เป็น `squash`/`fixup` ที่บรรทัด "fix typo" จะรวม commit ที่รกนั้นเข้ากับอันก่อนหน้า ทำให้ PR ของคุณแสดง commit สะอาดๆ 2 อัน แทนที่จะเป็น 3 อันที่รก
+
+## ควรใช้อันไหน?
+
+| สถานการณ์ | คำแนะนำ |
+|---|---|
+| อัปเดต local feature branch ของคุณด้วย `main` ล่าสุด | `rebase` (ทำให้ประวัติเป็นเส้นตรง รีวิวง่ายกว่า) |
+| Merge feature branch ที่เสร็จแล้วเข้า `main` ผ่าน PR | `merge` (ที่ส่วนใหญ่ใช้; "Squash and merge" ของ GitHub/GitLab เป็นทางสายกลางที่นิยม) |
+| branch ถูกแชร์กับเพื่อนร่วมทีม | `merge` เท่านั้น — อย่า rebase เด็ดขาด |
+| ทำความสะอาด commit ที่รกของตัวเองก่อนเปิด PR | `rebase -i` |
+
+<Note title="Best practice" type="success">
+  workflow ที่นิยมใช้และความเสี่ยงต่ำ: `git fetch` + `git rebase origin/main` บน feature branch
+  **ของตัวเอง** เพื่อให้อัปเดตล่าสุดอยู่เสมอ แล้วปล่อยให้เครื่องมือ PR ของทีม (เช่น "Squash and
+  merge" ของ GitHub) จัดการ merge สุดท้ายเข้า `main` วิธีนี้ทำให้ได้ประวัติเส้นตรงสะอาดๆ โดยไม่ต้อง
+  rebase branch ที่แชร์กันเลย
+</Note>
+
+<CardGrid>
+  <Card
+    title="Working with Remotes →"
+    href="/docs/git-workflow/remotes"
+    description="push, pull, fetch และการรักษา branch ให้ตรงกับ remote"
+  />
+</CardGrid>

@@ -1,0 +1,166 @@
+---
+title: "Index: พื้นฐาน"
+description: index ของฐานข้อมูลคืออะไรจริงๆ ควรเพิ่มเมื่อไหร่ ต้องแลกด้วยอะไร และจะตรวจสอบได้อย่างไรว่ามันถูกใช้งานอยู่
+keywords: ["index", "b-tree", "create index", "explain", "composite index", "sequential scan", "index scan"]
+---
+
+## index คืออะไร
+
+ถ้าไม่มี index การค้นหา `WHERE email = 'alice@example.com'` จะหมายถึงการอ่าน **ทุกแถว** ในตาราง — เรียกว่า *sequential scan* ซึ่งไม่มีปัญหาถ้ามีแค่ 100 แถว แต่ใช้งานไม่ได้เลยถ้ามี 10 ล้านแถว
+
+index คือโครงสร้างข้อมูลที่แยกออกมาต่างหากและถูกเรียงลำดับไว้ ทำให้ PostgreSQL กระโดดไปยังแถวที่ตรงกันได้ทันที คล้ายกับดัชนีท้ายเล่มหนังสือ type เริ่มต้นคือ **B-tree** ซึ่งเหมาะกับการเปรียบเทียบแบบเท่ากันและแบบช่วง
+
+B-tree มีลักษณะกว้างแต่ไม่ลึก: แต่ละ page ขนาด 8 KB เก็บ entry ได้หลายร้อยรายการ ดังนั้นแม้แต่ตารางที่มี 10 ล้านแถวก็สูงเพียงประมาณสี่ระดับเท่านั้น การหาหนึ่งแถวใช้การอ่าน page ประมาณสี่ครั้งแทนที่จะต้องอ่านสิบล้านครั้ง
+
+<Mermaid chart="graph TD
+  subgraph Without index
+  Q1[WHERE email = x] --> S[Scan all 10,000,000 rows]
+  end
+  subgraph With index
+  Q2[WHERE email = x] --> B[Walk B-tree: ~4 page reads]
+  B --> H[Fetch matching row]
+  end" />
+
+## การสร้าง index
+
+```sql showLineNumbers
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+
+-- Composite: one index covering several columns
+CREATE INDEX idx_orders_user_status ON orders(user_id, status);
+
+-- Unique index — also enforces uniqueness, like a UNIQUE constraint
+CREATE UNIQUE INDEX idx_users_email ON users(email);
+
+-- Partial: index only some rows, keeping it small
+CREATE INDEX idx_orders_pending ON orders(created_at) WHERE status = 'pending';
+
+DROP INDEX idx_orders_user_id;
+```
+
+<Note title="ใช้ CONCURRENTLY บน production" type="warning">
+  `CREATE INDEX` แบบธรรมดาจะล็อกตารางไม่ให้เขียนข้อมูลจนกว่าจะเสร็จ — บนตารางขนาดใหญ่อาจหมายถึงระบบล่มไปหลายนาที
+
+  ```sql
+  CREATE INDEX CONCURRENTLY idx_orders_user_id ON orders(user_id);
+  ```
+
+  วิธีนี้สร้าง index โดยไม่บล็อกการเขียนข้อมูล มันช้ากว่า รันภายใน transaction ไม่ได้ และอาจทิ้ง index
+  ที่ใช้งานไม่ได้ไว้ถ้าล้มเหลว (ต้องลบแล้วลองใหม่) — แต่นี่คือทางเลือกเดียวที่ปลอดภัยบนตารางที่ใช้งานจริงอยู่
+</Note>
+
+## สิ่งที่มี index อยู่แล้ว
+
+PostgreSQL สร้าง index ให้อัตโนมัติสำหรับ:
+
+- คอลัมน์ **`PRIMARY KEY`**
+- constraint **`UNIQUE`**
+
+แต่มัน **ไม่** สร้างให้กับคอลัมน์ foreign key:
+
+```sql showLineNumbers
+-- orders.user_id REFERENCES users(id) has NO index by default
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+```
+
+<Note title="ทำ index ให้ทุกคอลัมน์ foreign key" type="danger">
+  นี่คือ index ที่ขาดหายไปบ่อยที่สุดในโค้ดเบสที่ยังใหม่ ถ้าไม่มีมัน `WHERE user_id = $1` จะทำ full table scan,
+  การ join บนคอลัมน์นั้นจะช้า และการลบ user ต้องสแกน `orders` เพื่อเช็คการอ้างอิงด้วย เพิ่ม index ทุกครั้งที่เพิ่ม foreign key
+</Note>
+
+## เมื่อไหร่ควรเพิ่ม index
+
+ทำ index ให้คอลัมน์ที่ปรากฏใน:
+
+- **`WHERE` clause** ที่คุณรันบ่อยๆ
+- **เงื่อนไข `JOIN`** (คือ foreign key)
+- **`ORDER BY`** บนตารางขนาดใหญ่ — index ที่ตรงกันช่วยหลีกเลี่ยงการ sort
+- **constraint `UNIQUE`** (สร้างให้อัตโนมัติ)
+
+## ต้นทุนของ index
+
+index ไม่ได้มาฟรีๆ นี่คือเหตุผลว่าทำไม "ทำ index ให้ทุกอย่าง" ถึงเป็นกลยุทธ์ที่ผิด:
+
+- **การเขียนข้อมูลจะช้าลง** ทุก `INSERT`, `UPDATE` และ `DELETE` ต้องอัปเดตทุก index ที่เกี่ยวข้อง ตารางที่มี 8 index จะเขียนข้อมูลช้ากว่าตารางที่มีแค่ 2 index อย่างเห็นได้ชัด
+- **มันกินพื้นที่ดิสก์และหน่วยความจำ** index บนตารางขนาดใหญ่อาจมีขนาดหลายกิกะไบต์ แย่งพื้นที่ cache กับข้อมูลจริงของคุณ
+- **มันต้องการการดูแลรักษา** ยิ่งมี index มากเท่าไหร่ ก็ยิ่งมีงาน vacuum มากขึ้นเท่านั้น
+
+<Note title="กฎง่ายๆ" type="success">
+  เพิ่ม index เพื่อตอบสนอง **query ที่ช้าจริงๆ** ไม่ใช่เพิ่มไว้ล่วงหน้า เริ่มจาก primary key,
+  unique constraint และ foreign key — แล้วค่อยเพิ่มเมื่อ query เฉพาะเจาะจงตัวใดตัวหนึ่งช้าจนวัดได้จริง
+  index ที่ไม่ได้ใช้คือต้นทุนล้วนๆ
+</Note>
+
+## ลำดับคอลัมน์ใน composite index สำคัญ
+
+composite index ทำงาน **จากซ้ายไปขวา** `(user_id, status)` รองรับ:
+
+```sql showLineNumbers
+WHERE user_id = 1                      -- yes, uses the index
+WHERE user_id = 1 AND status = 'paid'  -- yes, uses both columns
+WHERE status = 'paid'                  -- NO — status is not the leading column
+```
+
+ให้คอลัมน์ที่ใช้เปรียบเทียบแบบ **เท่ากัน (equality)** อยู่ก่อน และถ้าทั้งคู่เป็น equality check ให้คอลัมน์ที่มีความจำเพาะเจาะจงมากกว่าอยู่ก่อน สำหรับ query สุดท้ายด้านบนจำเป็นต้องมี index แยกบน `status` เท่านั้น
+
+## ตรวจสอบว่า index ถูกใช้งานหรือไม่
+
+`EXPLAIN` แสดง plan ส่วน `EXPLAIN ANALYZE` จะรัน query จริงและรายงานเวลาที่ใช้จริงด้วย:
+
+```sql showLineNumbers
+EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 42;
+```
+
+```text showLineNumbers
+Index Scan using idx_orders_user_id on orders  (cost=0.29..8.31 rows=1 width=48)
+                                               (actual time=0.021..0.023 rows=3 loops=1)
+  Index Cond: (user_id = 42)
+Planning Time: 0.083 ms
+Execution Time: 0.041 ms
+```
+
+สิ่งที่ควรมองหา:
+
+| Plan node | ความหมาย |
+|---|---|
+| `Index Scan` | กำลังใช้ index — ดี |
+| `Index Only Scan` | ตอบได้จาก index ทั้งหมด ไม่ต้องเข้าถึงตัวตาราง — ดีที่สุด |
+| `Bitmap Heap Scan` | ใช้ index สำหรับแถวที่ตรงกันจำนวนมาก — ปกติแล้วโอเค |
+| `Seq Scan` | อ่านทั้งตาราง — โอเคสำหรับตารางเล็ก แต่เป็นสัญญาณเตือนสำหรับตารางใหญ่ |
+
+<Note title="Seq Scan ไม่ได้แปลว่าผิดเสมอไป" type="warning">
+  ถ้า query จับคู่กับข้อมูลสัดส่วนใหญ่ของตาราง การสแกนตามลำดับจะเร็วกว่าการวิ่งผ่าน index จริงๆ —
+  และ planner ก็รู้เรื่องนี้ดี บนตารางที่มี 50 แถว มันจะเลือก seq scan เสมอ เพราะถูกกว่า ให้ตัดสินจากเวลาที่ใช้จริง
+  บนข้อมูลปริมาณจริง ไม่ใช่จาก plan node เพียงอย่างเดียว
+</Note>
+
+## หา index ที่ไม่ได้ใช้งาน
+
+```sql showLineNumbers
+SELECT relname AS table, indexrelname AS index, idx_scan AS times_used
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+ORDER BY relname;
+```
+
+index ที่ `idx_scan = 0` ไม่เคยถูกใช้งานเลยตั้งแต่สถิติถูกรีเซ็ตครั้งล่าสุด — เป็นตัวเลือกที่ควรพิจารณาลบ (ยกเว้น index ที่รองรับ constraint อยู่)
+
+## แนวทางปฏิบัติที่ดี
+
+- **ทำ index ให้ทุกคอลัมน์ foreign key**
+- **เพิ่ม index ตอบสนอง query ที่ช้าที่วัดได้จริง** ไม่ใช่เพิ่มไว้ล่วงหน้า
+- **ใช้ `CREATE INDEX CONCURRENTLY`** บนตาราง production
+- **ระวังลำดับคอลัมน์ใน composite index** — คอลัมน์ที่อยู่ซ้ายสุดคือตัวที่มีผล
+- **ตั้งชื่อ index ให้สม่ำเสมอ** เช่น `idx_<table>_<columns>`
+- **ตรวจสอบด้วย `EXPLAIN ANALYZE`** บนข้อมูลปริมาณจริง — index ที่ไม่ได้ใช้แย่กว่าไม่มี index เสียอีก
+- **รีวิวและลบ index ที่ไม่ได้ใช้งาน** เป็นระยะๆ
+
+Query plan แบบเจาะลึก, index type อื่นนอกจาก B-tree (GIN, GiST, BRIN) และการวินิจฉัย N+1 query อธิบายไว้ใน [Query Optimization](/docs/query-optimization)
+
+<CardGrid>
+  <Card
+    title="Using PostgreSQL from Go →"
+    href="/docs/sql-postgresql-basics/using-from-go"
+    description="pgx, รูปแบบการ query และการป้องกัน SQL injection"
+  />
+</CardGrid>

@@ -1,0 +1,194 @@
+---
+title: Transaction
+description: BEGIN, COMMIT, ROLLBACK และการรับประกันแบบ ACID ที่ทำให้การเปลี่ยนแปลงข้อมูลหลายขั้นตอนปลอดภัย
+keywords: ["transaction", "acid", "begin", "commit", "rollback", "savepoint", "atomicity", "row lock"]
+---
+
+## ปัญหาที่ transaction แก้ไข
+
+ลองนึกถึงการโอนเงินระหว่างบัญชี — การ update สองครั้งที่ต้องเกิดขึ้นทั้งคู่หรือไม่เกิดขึ้นเลย:
+
+```sql showLineNumbers
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+-- if the server crashes HERE, money has vanished
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+```
+
+transaction จะรวม statement เข้าเป็นหน่วยเดียวแบบทั้งหมดหรือไม่มีเลย:
+
+```sql showLineNumbers
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;
+```
+
+ตอนนี้ไม่ว่าจะทั้งสอง update จะถูกบันทึกถาวร หรือ — ถ้าเกิดความล้มเหลวใดๆ ก่อน `COMMIT` — ก็จะไม่มีอะไรเกิดขึ้นเลยแม้แต่ครั้งเดียว
+
+<Mermaid chart="graph LR
+  B[BEGIN] --> S1[statement 1]
+  S1 --> S2[statement 2]
+  S2 --> D{Everything OK?}
+  D -->|Yes| C[COMMIT<br/>all changes persist]
+  D -->|No| R[ROLLBACK<br/>all changes discarded]" />
+
+## BEGIN, COMMIT, ROLLBACK
+
+```sql showLineNumbers
+BEGIN;                                    -- start
+INSERT INTO orders (user_id, product_id) VALUES (1, 5);
+UPDATE products SET stock = stock - 1 WHERE id = 5;
+COMMIT;                                   -- make it permanent
+
+BEGIN;
+DELETE FROM orders WHERE status = 'cancelled';
+-- check the row count, and if it looks wrong:
+ROLLBACK;                                 -- undo everything since BEGIN
+```
+
+<Note title="ใช้ transaction ก่อนการเปลี่ยนแปลงด้วยมือที่มีความเสี่ยง" type="success">
+  เมื่อรันคำสั่ง `UPDATE` หรือ `DELETE` ที่ทำลายข้อมูลด้วยมือ ให้ห่อมันไว้:
+
+  ```sql
+  BEGIN;
+  DELETE FROM orders WHERE created_at < '2020-01-01';
+  -- psql prints: DELETE 4823
+  -- Expected ~4800? COMMIT. Says DELETE 250000? ROLLBACK.
+  ```
+
+  วิธีนี้เปลี่ยน "ผมเพิ่งทำ production พังไปแล้ว" ให้กลายเป็นเรื่องธรรมดาที่ไม่เกิดผลกระทบอะไร ทำให้เป็นนิสัย
+</Note>
+
+นอกเหนือจาก `BEGIN` ที่ระบุไว้ชัดเจน PostgreSQL จะรันทุก statement ใน transaction แบบ implicit ของตัวเอง — ดังนั้น statement เดี่ยวๆ จะเป็น atomic อยู่แล้วโดยธรรมชาติ
+
+## ACID
+
+การรับประกันสี่ข้อที่ transaction มอบให้:
+
+| คุณสมบัติ | ความหมาย |
+|---|---|
+| **Atomicity** | statement ทั้งหมดสำเร็จ หรือไม่มีอันไหนสำเร็จเลย ไม่มีการทำสำเร็จบางส่วน |
+| **Consistency** | constraint ยังคงเป็นจริงทั้งก่อนและหลัง transaction จะไม่ทิ้งข้อมูลที่ไม่ถูกต้องไว้ |
+| **Isolation** | transaction ที่รันพร้อมกันจะไม่เห็นการเปลี่ยนแปลงที่ยังไม่ commit ของกันและกัน |
+| **Durability** | เมื่อ commit แล้ว การเปลี่ยนแปลงจะอยู่รอดแม้ระบบล่มหรือไฟดับ |
+
+## Error จะทำให้ transaction ทั้งหมดถูกยกเลิก
+
+PostgreSQL เข้มงวดในจุดนี้ ซึ่งทำให้คนที่มาจาก MySQL แปลกใจ:
+
+```sql showLineNumbers
+BEGIN;
+INSERT INTO users (email, name) VALUES ('alice@example.com', 'Alice');
+INSERT INTO users (email, name) VALUES ('alice@example.com', 'Dup');  -- UNIQUE violation
+SELECT * FROM users;
+-- ERROR: current transaction is aborted, commands ignored until
+--        end of transaction block
+COMMIT;   -- behaves as ROLLBACK
+```
+
+หลังจากเกิด error ใดๆ transaction จะเข้าสู่สถานะ aborted และปฏิเสธทุกอย่างจนกว่าคุณจะ `ROLLBACK` ไม่มีการ "ทำต่อหลังจากล้มเหลว" — ซึ่งเป็นค่าเริ่มต้นที่ปลอดภัย
+
+### Savepoint
+
+ถ้าคุณต้องการกู้คืนจาก statement ที่ล้มเหลวหนึ่งตัวจริงๆ โดยไม่ยกเลิก transaction ทั้งหมด:
+
+```sql showLineNumbers
+BEGIN;
+INSERT INTO users (email, name) VALUES ('bob@example.com', 'Bob');
+
+SAVEPOINT sp1;
+INSERT INTO users (email, name) VALUES ('bob@example.com', 'Dup');  -- fails
+ROLLBACK TO SAVEPOINT sp1;   -- undo just that, transaction stays alive
+
+INSERT INTO users (email, name) VALUES ('carol@example.com', 'Carol');
+COMMIT;   -- Bob and Carol are saved
+```
+
+ใช้อย่างประหยัด — มันเพิ่มความซับซ้อน และส่วนใหญ่ `ON CONFLICT` มักเป็นคำตอบที่ดีกว่า
+
+## Concurrency และ lock
+
+`UPDATE` จะจับ row-level lock ไว้จนกว่า transaction จะจบลง transaction อีกตัวที่ update แถวเดียวกันจะต้องรอ
+
+```sql showLineNumbers
+-- Session A
+BEGIN;
+UPDATE products SET stock = stock - 1 WHERE id = 5;
+-- Session B's UPDATE on id = 5 now blocks here...
+COMMIT;   -- ...and proceeds once A commits
+```
+
+### SELECT ... FOR UPDATE
+
+การอ่านแล้วค่อยเขียนเป็น race condition: สอง transaction อ่านค่า `stock = 1` ทั้งคู่ตัดสินใจว่าโอเค ทั้งคู่ลดค่าลง สุดท้าย stock กลายเป็น `-1` `FOR UPDATE` จะล็อกแถวที่คุณอ่าน:
+
+```sql showLineNumbers
+BEGIN;
+SELECT stock FROM products WHERE id = 5 FOR UPDATE;   -- locks the row
+-- other transactions block here until we commit
+UPDATE products SET stock = stock - 1 WHERE id = 5;
+COMMIT;
+```
+
+<Note title="เลือกใช้ statement เดียวแบบ atomic เมื่อทำได้" type="success">
+  หลายครั้งคุณไม่จำเป็นต้องล็อกแบบชัดเจนเลย ปล่อยให้ฐานข้อมูลอ่านและเขียนในขั้นตอนเดียว ซึ่งเป็น atomic โดยนิยาม:
+
+  ```sql
+  UPDATE products SET stock = stock - 1
+  WHERE id = 5 AND stock > 0
+  RETURNING stock;
+  ```
+
+  ถ้าไม่มีแถวคืนกลับมา แปลว่าสต็อกไม่พอ ง่ายและเร็วกว่า `SELECT ... FOR UPDATE` บวกกับ `UPDATE` แยกต่างหาก
+</Note>
+
+<Note title="Deadlock" type="warning">
+  สอง transaction ที่ต่างถือ lock ที่อีกฝ่ายต้องการอยู่จะเกิด deadlock PostgreSQL จะตรวจจับเรื่องนี้และ
+  kill ตัวใดตัวหนึ่งด้วย error code `40P01` วิธีแก้คือ **จับ lock ในลำดับที่สม่ำเสมอเสมอ**
+  (เช่น update account id ที่น้อยกว่าก่อนทุกครั้ง) และ retry transaction ที่ถูก abort ใน application code
+</Note>
+
+## ทำให้ transaction สั้นเข้าไว้
+
+<Note title="ห้ามเปิด transaction ค้างไว้ระหว่างงานที่ช้า" type="danger">
+  ```go
+  tx, _ := db.Begin(ctx)
+  tx.Exec(ctx, "UPDATE orders SET status = 'paid' WHERE id = $1", id)
+  chargeCreditCard()          // 3-second external HTTP call — locks held the whole time
+  tx.Commit(ctx)
+  ```
+
+  lock จะถูกถือไว้ตลอดทั้ง transaction ดังนั้น request อื่นๆ ที่แตะแถวเหล่านั้นจะถูกบล็อกทั้งหมด
+  transaction ที่นานยังขัดขวางไม่ให้ PostgreSQL ทำ vacuum แถวที่ตายแล้วได้ ซึ่งทำให้ฐานข้อมูลบวมขึ้น
+
+  ให้ทำการเรียกภายนอกนอก transaction หรือใช้ outbox pattern transaction ควรมีแต่งานฐานข้อมูลล้วนๆ
+  และจบลงภายในเวลาระดับมิลลิวินาที
+</Note>
+
+## Isolation level — ฉบับสั้น
+
+ค่าเริ่มต้นของ PostgreSQL คือ `READ COMMITTED`: แต่ละ statement จะเห็นเฉพาะข้อมูลที่ถูก commit ก่อนที่ statement นั้นจะเริ่มทำงาน นี่คือค่าเริ่มต้นที่เหมาะสมสำหรับ application code เกือบทั้งหมด
+
+```sql showLineNumbers
+BEGIN ISOLATION LEVEL REPEATABLE READ;   -- consistent snapshot for the whole transaction
+BEGIN ISOLATION LEVEL SERIALIZABLE;      -- strongest; may abort with a serialization failure
+```
+
+Isolation level ที่เข้มงวดกว่าจะแลก throughput กับการรับประกันที่เข้มงวดขึ้น และต้องมี retry logic รองรับ ความผิดปกติที่มันป้องกันได้ — non-repeatable read, phantom read, write skew — อธิบายไว้ใน [PostgreSQL Advanced](/docs/postgresql-advanced)
+
+## แนวทางปฏิบัติที่ดี
+
+- **ห่อการเขียนข้อมูลที่เกี่ยวข้องกันด้วย transaction** เพื่อไม่ให้เกิดการทำสำเร็จบางส่วน
+- **ใช้ `BEGIN` ก่อนคำสั่งทำลายข้อมูลด้วยมือ** และตรวจสอบจำนวนแถวก่อน commit
+- **ทำ transaction ให้สั้นเข้าไว้** — งานฐานข้อมูลล้วนๆ ไม่มีเรียก HTTP ไม่มี user input ไม่มีการ sleep
+- **`defer tx.Rollback()` เสมอ** ใน Go การ rollback transaction ที่ commit ไปแล้วเป็น no-op ที่ไม่เป็นอันตราย ([รายละเอียด](/docs/sql-postgresql-basics/using-from-go#transactions-in-go))
+- **เลือก statement เดียวแบบ atomic** แทน `SELECT` + `UPDATE` เมื่อทำได้
+- **จับ lock ในลำดับที่สม่ำเสมอ** และ retry เมื่อเกิด deadlock (`40P01`) หรือ serialization failure (`40001`)
+
+<CardGrid>
+  <Card
+    title="Indexes: The Basics →"
+    href="/docs/sql-postgresql-basics/indexes"
+    description="index คืออะไร ควรเพิ่มเมื่อไหร่ และต้องแลกด้วยอะไร"
+  />
+</CardGrid>

@@ -1,0 +1,94 @@
+---
+title: กลยุทธ์ Git Workflow
+description: เปรียบเทียบ Feature Branch Workflow, Git Flow และ Trunk-Based Development — และควรเลือกแบบไหนสำหรับทีมเล็ก
+keywords: ["feature branch workflow", "git flow", "trunk-based development", "branching strategy"]
+---
+
+ทุกอย่างที่ผ่านมา (branching, merging, rebasing) ล้วนเป็น *กลไก* ส่วน **workflow strategy** คือ *นโยบาย* ที่ทีมตกลงกันว่าจะใช้กลไกเหล่านั้นอย่างไร — เมื่อไหร่ควรแตก branch, branch ควรมีอายุนานแค่ไหน และโค้ดจะไปถึง production ได้อย่างไร
+
+## Feature Branch Workflow
+
+กลยุทธ์ที่ง่ายและพบบ่อยที่สุด: ทุกการเปลี่ยนแปลง (feature, fix, chore) มี branch ของตัวเองที่แยกจาก `main` และ merge กลับผ่าน pull request หลังรีวิวเสร็จ
+
+<Mermaid chart="gitGraph
+  commit id: 'init'
+  branch feature/login
+  checkout feature/login
+  commit id: 'add login form'
+  commit id: 'add validation'
+  checkout main
+  merge feature/login
+  branch fix/typo
+  checkout fix/typo
+  commit id: 'fix typo'
+  checkout main
+  merge fix/typo" />
+
+- **ข้อดี:** ง่าย อธิบายง่าย ใช้ได้กับ flow การรีวิว PR ของแพลตฟอร์มโฮสต์ไหนก็ได้
+- **ข้อเสีย:** ในตัวมันเองไม่ได้บอกอะไรเกี่ยวกับ *การ release* — เหมาะกับเว็บไซต์ที่ deploy ต่อเนื่อง แต่ไม่ชัดเจนสำหรับซอฟต์แวร์ที่มีเวอร์ชันและกำหนด release เป็นรอบๆ
+
+## Git Flow
+
+โมเดลที่หนักกว่า โดยมี branch อายุยืนเฉพาะทางสำหรับแต่ละวัตถุประสงค์:
+
+- `main` — สะท้อนโค้ด production ที่ **release** ล่าสุดเสมอ
+- `develop` — branch สำหรับรวม feature ก่อนจะ release
+- `feature/*` — แตกมาจาก `develop` และ merge กลับเข้า `develop`
+- `release/*` — แตกจาก `develop` เมื่อกำลังเตรียม release (ทดสอบขั้นสุดท้าย/แก้บั๊ก)
+- `hotfix/*` — แตกจาก `main` สำหรับแก้ปัญหา production เร่งด่วน แล้ว merge เข้าทั้ง `main` และ `develop`
+
+<Mermaid chart="graph TD
+  M[main] --> H[hotfix/*]
+  H --> M
+  H --> D[develop]
+  D --> F[feature/*]
+  F --> D
+  D --> R[release/*]
+  R --> M
+  R --> D" />
+
+- **ข้อดี:** ชัดเจนมากว่าอะไร release แล้ว อะไรยังทำอยู่; เหมาะกับซอฟต์แวร์ที่มีการ release เป็นเวอร์ชันตามกำหนดเวลา (เช่น แอปมือถือ, ซอฟต์แวร์ที่ต้องติดตั้ง)
+- **ข้อเสีย:** มีขั้นตอนหนักเกินไปสำหรับทีมที่ deploy ต่อเนื่อง; มากเกินจำเป็นสำหรับทีมเล็กหรือโปรเจกต์คนเดียว
+
+## Trunk-Based Development
+
+ตรงข้ามกันสุดขั้ว: ทุกคน commit ตรงเข้า `main` (the "trunk") หรือใช้ branch อายุสั้นมากๆ (เป็นชั่วโมง ไม่ใช่สัปดาห์) ที่ merge กลับเข้ามาตลอดเวลา feature flag ใช้ซ่อนงานที่ยังไม่เสร็จใน production แทนที่จะแยกไว้ใน branch
+
+<Mermaid chart="gitGraph
+  commit id: 'A'
+  commit id: 'B'
+  branch feature/x
+  commit id: 'small change'
+  checkout main
+  merge feature/x
+  commit id: 'C'
+  commit id: 'D'" />
+
+- **ข้อดี:** หลีกเลี่ยง merge ก้อนใหญ่ที่ปวดหัวได้ทั้งหมด; เข้ากันได้ดีกับ continuous deployment และ CI/CD
+- **ข้อเสีย:** ต้องการ test coverage และวินัยด้าน CI ที่แข็งแรง — ถ้าไม่มี `main` จะพังบ่อย
+
+## เปรียบเทียบ
+
+| | Feature Branch | Git Flow | Trunk-Based |
+|---|---|---|---|
+| อายุ branch | เป็นวัน | เป็นวัน–สัปดาห์ | เป็นชั่วโมง |
+| เหมาะกับ | ทีมเล็ก/กลางส่วนใหญ่ | release ที่มีเวอร์ชัน (มือถือ, ซอฟต์แวร์แพ็กเกจ) | continuous deployment, test coverage สูง |
+| ความซับซ้อน | ต่ำ | สูง | ต่ำ (แต่ต้องมีวินัย/CI) |
+| โมเดล release | deploy `main` เมื่อไหร่ก็พร้อม | release ตามกำหนดผ่าน `release/*` | deploy `main` ต่อเนื่อง |
+
+## คำแนะนำสำหรับโปรเจกต์เล็กหรือคนเดียว
+
+<Note title="Recommendation" type="success">
+  เริ่มด้วย **Feature Branch Workflow**: แตก branch จาก `main` สำหรับทุกการเปลี่ยนแปลง เปิด PR
+  (แม้จะทำคนเดียวก็ตาม — เป็นนิสัยที่ดีและให้จุดตรวจสอบก่อน merge) แล้ว merge ลบ branch ทิ้ง
+  นี่คือขั้นตอนน้อยที่สุดแต่ได้ประโยชน์มากที่สุด ใช้ Git Flow เฉพาะเมื่อคุณ release เป็นเวอร์ชันตาม
+  กำหนดเวลาจริงๆ และใช้ Trunk-Based เฉพาะเมื่อมี CI/test coverage ที่แข็งแรงพอจะปกป้อง `main`
+</Note>
+
+<CardGrid>
+  <Card
+    title=".gitignore & Git Hooks →"
+    href="/docs/git-workflow/gitignore-hooks"
+    description="กัน build artifact และข้อมูลลับออกจาก repo และทำ automate การตรวจสอบก่อน commit"
+  />
+</CardGrid>

@@ -1,0 +1,478 @@
+---
+title: หลักการ SOLID
+description: หลักการ SOLID ทั้งห้าข้อของการออกแบบเชิงวัตถุและ interface ประยุกต์ใช้กับ Go
+keywords: ["SOLID", "single responsibility", "open closed", "liskov substitution", "interface segregation", "dependency inversion", "golang design principles", "dependency injection"]
+---
+
+## SOLID คืออะไร
+
+หลักการออกแบบห้าข้อ ตั้งชื่อโดย Robert C. Martin ว่าด้วยเรื่องการวางเส้นแบ่งขอบเขตให้โค้ดยังคงเปลี่ยนแปลงได้ง่าย มันถูกเขียนขึ้นสำหรับ OOP แบบใช้ class แต่ interface และ composition ของ Go สื่อความหมายส่วนใหญ่ของมันได้ตรงกว่าที่ Java เคยทำได้เสียอีก
+
+| | หลักการ | สรุปในบรรทัดเดียว |
+|---|---|---|
+| **S** | Single Responsibility | มีเหตุผลให้เปลี่ยนแปลงเพียงเหตุผลเดียว |
+| **O** | Open/Closed | ขยายด้วยการเพิ่ม ไม่ใช่การแก้ไข |
+| **L** | Liskov Substitution | implementation ต้องไม่สร้างความประหลาดใจให้ caller |
+| **I** | Interface Segregation | interface เล็ก ๆ เฉพาะแต่ละผู้ใช้งาน |
+| **D** | Dependency Inversion | พึ่งพา interface ไม่ใช่ concrete type |
+
+หลักการเหล่านี้ไม่ใช่กฎไว้ใช้ให้คะแนนโค้ด แต่เป็น **ชื่อเรียกสาเหตุที่การเปลี่ยนแปลงหนึ่งครั้งเจ็บปวด** — เมื่อ feature เล็ก ๆ บังคับให้คุณต้องแก้ไฟล์หกไฟล์ หนึ่งในหลักการเหล่านี้มักอธิบายได้ว่าทำไม
+
+## S — Single Responsibility
+
+หน่วยของโค้ดควรมี **เหตุผลให้เปลี่ยนแปลงเพียงเหตุผลเดียว** สังเกตคำพูด: ไม่ใช่ "ทำสิ่งเดียว" ซึ่งคลุมเครือเกินกว่าจะใช้ได้จริง บททดสอบคือ *ใคร* เป็นคนขอให้เปลี่ยนแปลงมัน
+
+struct ที่ละเมิดหลักการนี้:
+
+```go showLineNumbers
+// Three different people can force a change here:
+// the product owner (rules), the DBA (schema), the marketing team (email copy).
+type UserManager struct{ db *pgxpool.Pool }
+
+func (m *UserManager) Register(ctx context.Context, email, name string) error {
+    if !strings.Contains(email, "@") {                        // business rule
+        return errors.New("invalid email")
+    }
+    _, err := m.db.Exec(ctx,                                  // persistence
+        `INSERT INTO users (email, name) VALUES ($1, $2)`, email, name)
+    if err != nil {
+        return err
+    }
+    body := fmt.Sprintf("Welcome %s! Click here to...", name) // email content
+    return smtp.SendMail("smtp.example.com:587", nil,
+        "noreply@example.com", []string{email}, []byte(body))
+}
+```
+
+แบ่งตามว่าใครเป็นเจ้าของการเปลี่ยนแปลง:
+
+```go showLineNumbers
+// Business rules — owned by the domain.
+type UserService struct {
+    store    UserStore
+    notifier Notifier
+}
+
+func (s *UserService) Register(ctx context.Context, email, name string) (*User, error) {
+    if err := validateEmail(email); err != nil {
+        return nil, err
+    }
+    u := &User{Email: email, Name: name}
+    if err := s.store.Create(ctx, u); err != nil {
+        return nil, fmt.Errorf("creating user: %w", err)
+    }
+    if err := s.notifier.SendWelcome(ctx, u); err != nil {
+        slog.Error("welcome notification failed", "user_id", u.ID, "err", err)
+    }
+    return u, nil
+}
+```
+
+ตอนนี้การเปลี่ยน schema จะแตะแค่ store การเปลี่ยนข้อความอีเมลจะแตะแค่ notifier และกฎการลงทะเบียนอยู่ใน function เดียวที่อ่านง่าย
+
+<Note title="ใช้ได้กับทั้ง function และ package เช่นกัน" type="success">
+  บททดสอบเดียวกันนี้ใช้ได้ในทุกระดับ package ชื่อ `utils` ผิดหลักการนี้โดยธรรมชาติ — มันเปลี่ยน
+  ด้วยทุกเหตุผลที่มีอยู่ ตั้งชื่อ package ตามสิ่งที่มันรับผิดชอบ (`payment`, `auth`,
+  `ratelimit`) ไม่ใช่ตามประเภทของโค้ดที่อยู่ข้างใน (`helpers`, `common`, `models`)
+</Note>
+
+## O — Open/Closed
+
+เปิดสำหรับการขยาย ปิดสำหรับการแก้ไข: **การเพิ่ม case ใหม่ควรหมายถึงการเพิ่มโค้ด ไม่ใช่การแก้โค้ดเดิม**
+
+กลิ่นของปัญหาคือ `switch` ที่โตขึ้นทุกครั้งที่ธุรกิจโตขึ้น:
+
+```go showLineNumbers
+// Every new payment method edits this function — and risks breaking the others.
+func Charge(method string, amount int64) error {
+    switch method {
+    case "credit_card":
+        // 20 lines of Stripe
+    case "paypal":
+        // 20 lines of PayPal
+    case "promptpay":
+        // 20 lines of PromptPay
+    }
+    return fmt.Errorf("unknown method %q", method)
+}
+```
+
+กลับด้านด้วย interface:
+
+```go showLineNumbers
+type PaymentMethod interface {
+    Charge(ctx context.Context, amountCents int64) (*Receipt, error)
+}
+
+type Processor struct {
+    methods map[string]PaymentMethod
+}
+
+func (p *Processor) Register(name string, m PaymentMethod) {
+    p.methods[name] = m
+}
+
+func (p *Processor) Charge(ctx context.Context, name string, amount int64) (*Receipt, error) {
+    m, ok := p.methods[name]
+    if !ok {
+        return nil, fmt.Errorf("unsupported payment method %q", name)
+    }
+    return m.Charge(ctx, amount)
+}
+```
+
+การเพิ่มการชำระด้วย crypto ตอนนี้กลายเป็นแค่ไฟล์ใหม่หนึ่งไฟล์บวกกับการเรียก `Register` หนึ่งครั้งใน `main.go` `Processor` ไม่เคยเปลี่ยนแปลงเลย มันจึง regress ไม่ได้
+
+<Note title="อย่ากลับด้านทุก switch" type="warning">
+  `switch` บนชุดค่าที่ไม่มีวันโตขึ้นจริง ๆ — HTTP method, วันในสัปดาห์, enum แบบปิด
+  — ก็ใช้ได้ดีและชัดเจนกว่า interface Open/Closed คุ้มค่าตรงที่**คุณคาดว่าจะมี variant ใหม่เพิ่มขึ้น**
+  การใช้มันทุกที่คือการซื้อ indirection ที่คุณไม่มีวันได้ใช้คืน
+</Note>
+
+## L — Liskov Substitution
+
+implementation ใด ๆ ของ interface ต้องใช้งานได้ **ทุกที่ที่ interface นั้นถูกคาดหวัง โดยที่ caller ไม่ต้องเปลี่ยนพฤติกรรม** compiler ของ Go ตรวจสอบ method signature ให้ แต่มันตรวจสอบ contract ให้ไม่ได้ ดังนั้นเรื่องนี้จึงเป็นหน้าที่ของคุณ
+
+การละเมิดที่ compiler ยอมรับอย่างสบายใจ:
+
+```go showLineNumbers
+type Store interface {
+    Save(ctx context.Context, u *User) error
+    Delete(ctx context.Context, id int64) error
+}
+
+type ReadOnlyStore struct{ /* ... */ }
+
+func (s *ReadOnlyStore) Save(ctx context.Context, u *User) error {
+    panic("not supported")                    // caller had no way to know
+}
+
+func (s *ReadOnlyStore) Delete(ctx context.Context, id int64) error {
+    return nil                                // worse: silently does nothing
+}
+```
+
+ทั้งสองแบบเป็นการละเมิด Liskov panic ทำลาย caller ที่คาดหวัง error อย่างสมเหตุสมผล ส่วนการทำอะไรไปเงียบ ๆ (silent no-op) ยิ่งแย่กว่า เพราะมันล้มเหลวโดยไม่บอกใครเลย
+
+วิธีแก้มักจะเป็น **interface ที่เล็กลง** — ซึ่งก็คือ Interface Segregation และเป็นเหตุผลว่าทำไมสองหลักการนี้มักปรากฏคู่กันเสมอ:
+
+```go showLineNumbers
+type UserReader interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+}
+
+type UserWriter interface {
+    Save(ctx context.Context, u *User) error
+    Delete(ctx context.Context, id int64) error
+}
+
+// A read-only cache satisfies UserReader honestly and can't be
+// passed where writes are required — the compiler stops it.
+```
+
+การละเมิด contract แบบแนบเนียนที่ต้องระวัง:
+
+- **precondition ที่เข้มงวดกว่า** interface ยอมรับ string อะไรก็ได้ แต่ implementation ของคุณ panic เมื่อได้ string ว่าง caller ไม่มีทางรู้ล่วงหน้า
+- **ความหมายของ error ต่างกัน** implementation หนึ่ง return sentinel สำหรับ "not found" อีกตัว return `nil, nil` caller ทุกตัวตอนนี้ต้องมี `if` แยกต่อ implementation
+- **บล็อกในจุดที่ caller คาดหวังความเร็ว** fake แบบ in-memory return ทันที ส่วนตัวจริงเรียก network สามครั้งโดยไม่สนใจ `ctx`
+
+<Note title="เขียน contract ไว้ใน interface" type="success">
+  ```go
+  type UserStore interface {
+      // GetByID returns ErrNotFound if no user has that id.
+      // It must respect ctx cancellation.
+      GetByID(ctx context.Context, id int64) (*User, error)
+  }
+  ```
+  compiler บังคับใช้ signature ส่วนคอมเมนต์บวกกับชุด test ที่ใช้ร่วมกันคือวิธีบังคับใช้ส่วนที่เหลือ
+  ถ้าคุณมีหลาย implementation ให้เขียน table test เดียวแล้วรันกับทุก implementation
+</Note>
+
+## I — Interface Segregation
+
+ไม่มี client คนไหนควรถูกบังคับให้พึ่งพา method ที่ตัวเองไม่ได้ใช้ นี่คือหลักการที่ Go ผลักดันให้คุณทำมากที่สุด และ standard library ก็เป็นเครื่องพิสูจน์ — `io.Reader`, `io.Writer`, `fmt.Stringer` และ `error` ล้วนมี method เดียวเท่านั้น
+
+interface ที่อ้วนเกินไป:
+
+```go showLineNumbers
+type UserRepository interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+    GetByEmail(ctx context.Context, email string) (*User, error)
+    List(ctx context.Context, limit, offset int) ([]User, error)
+    Create(ctx context.Context, u *User) error
+    Update(ctx context.Context, u *User) error
+    Delete(ctx context.Context, id int64) error
+    CountActive(ctx context.Context) (int, error)
+    SearchByName(ctx context.Context, q string) ([]User, error)
+}
+```
+
+service ที่แค่อ่าน user ตาม ID ก็ยังต้องรับ method ทั้งแปดตัวมาด้วย — และ test fake ทุกตัวก็ต้อง implement ทั้งแปดตัวเช่นกัน แทนที่จะทำแบบนั้น ให้ผู้ใช้งานแต่ละรายประกาศสิ่งที่ตัวเองต้องการเอง:
+
+```go showLineNumbers title="internal/auth/auth.go"
+package auth
+
+// Auth needs exactly one method. So it asks for exactly one.
+type UserFinder interface {
+    GetByEmail(ctx context.Context, email string) (*user.User, error)
+}
+
+type Service struct{ users UserFinder }
+```
+
+```go showLineNumbers title="internal/auth/auth_test.go"
+type fakeFinder struct{ u *user.User }
+
+func (f fakeFinder) GetByEmail(context.Context, string) (*user.User, error) {
+    return f.u, nil
+}
+// One method. That's the whole test double — no mocking library.
+```
+
+`postgres.UserStore` แบบ concrete ยังคงมีครบทั้งแปด method และ satisfy interface เล็ก ๆ เหล่านี้ทุกตัวโดย implicit ไม่มีอะไรถูกเขียนซ้ำเลย ผู้ใช้งานแต่ละรายแค่เห็นมุมมองที่แคบลงเท่านั้น
+
+<Note title="Interface เป็นของฝั่งผู้ใช้งาน (consumer)" type="success">
+  นี่คือคำแนะนำด้านการออกแบบที่เป็น Go-specific มากที่สุดในหน้านี้ เพราะการ satisfy เป็น
+  implicit ให้นิยาม interface ไว้ใน package ที่*เรียกใช้*มัน ไม่ใช่ไว้ข้าง ๆ implementation
+  package `postgres` ไม่ควร export interface เลยแม้แต่ตัวเดียว — มัน export แค่ struct และ
+  ผู้ใช้งานแต่ละรายอธิบายเฉพาะส่วนที่ตัวเองต้องการ ดู
+  [Interfaces](/docs/golang-fundamentals/interfaces)
+</Note>
+
+## D — Dependency Inversion
+
+โค้ดระดับสูงไม่ควรพึ่งพารายละเอียดระดับต่ำ ทั้งสองฝ่ายควรพึ่งพา abstraction แทน
+
+<Mermaid chart="graph TD
+  S[UserService<br/>high-level policy] -->|depends on| I[UserStore interface<br/>declared in the service package]
+  P[postgres.UserStore<br/>low-level detail] -.->|satisfies| I
+  F[in-memory fake<br/>low-level detail] -.->|satisfies| I" />
+
+ถ้าไม่มีการกลับด้าน `UserService` จะชี้ตรงไปที่ `postgres.UserStore` แต่ในที่นี้ทั้งสองฝ่ายชี้ไปที่ interface แทน — และลูกศรจาก `postgres` วิ่ง *ขึ้นไป* การกลับทิศทางนั้นเองคือ "inversion" package ของ service ไม่ import อะไรจาก `postgres` เลย ดังนั้นมันจึง compile, test และเข้าใจได้ด้วยตัวมันเอง
+
+โดยเป็นรูปธรรม:
+
+```go showLineNumbers
+// Before: the service is welded to pgx.
+type UserService struct {
+    pool *pgxpool.Pool                    // can't test without a real database
+}
+
+func (s *UserService) GetUser(ctx context.Context, id int64) (*User, error) {
+    var u User
+    err := s.pool.QueryRow(ctx, `SELECT id, email FROM users WHERE id = $1`, id).
+        Scan(&u.ID, &u.Email)
+    // business logic and SQL, tangled
+}
+```
+
+```go showLineNumbers
+// After: the service depends on an interface it defines itself.
+type UserStore interface {
+    GetByID(ctx context.Context, id int64) (*User, error)
+}
+
+type UserService struct {
+    store UserStore
+}
+
+func NewUserService(store UserStore) *UserService {
+    return &UserService{store: store}
+}
+```
+
+การ wiring ยังคงชัดเจนและอยู่ในที่เดียว:
+
+```go showLineNumbers title="cmd/api/main.go"
+pool, err := db.New(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+store := postgres.NewUserStore(pool)          // low-level detail, chosen once
+svc := user.NewUserService(store)             // injected into the high-level policy
+handler := httpapi.NewUserHandler(svc)
+```
+
+<Note title="Dependency injection ใน Go หมายถึงการส่ง argument" type="warning">
+  ไม่ต้องมี framework และไม่ต้องมี container "DI" ใน Go ก็แค่ constructor parameter
+  ที่ประกอบเข้าด้วยกันใน `main.go` ถ้าคุณพบว่าตัวเองกำลังจะหยิบ DI library มาใช้กับ
+  service ที่มี dependency สิบกว่าตัว ให้ลอง wire ด้วยมือก่อน — ปกติแล้วจะเป็นแค่โค้ด
+  20 บรรทัดที่อ่านง่าย
+</Note>
+
+## ตัวอย่างจริง: refactor ไปสู่ SOLID
+
+เริ่มจากร่างแรกที่ดูสมเหตุสมผล — handler ที่ทำทุกอย่าง:
+
+```go showLineNumbers title="Before"
+type OrderHandler struct {
+    pool   *pgxpool.Pool
+    stripe *stripe.Client
+}
+
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req CreateOrderRequest
+    json.NewDecoder(r.Body).Decode(&req)
+
+    if req.Quantity <= 0 {                                     // business rule
+        http.Error(w, "quantity must be positive", 400)
+        return
+    }
+
+    var price int64                                            // persistence
+    h.pool.QueryRow(r.Context(),
+        `SELECT price FROM products WHERE id = $1`, req.ProductID).Scan(&price)
+
+    total := price * int64(req.Quantity)
+    if req.Coupon == "SAVE10" {                                // pricing rule
+        total = total * 90 / 100
+    }
+
+    ch, err := h.stripe.Charge(req.CardToken, total)           // payment
+    if err != nil {
+        http.Error(w, "payment failed", 402)
+        return
+    }
+
+    h.pool.Exec(r.Context(),                                   // persistence again
+        `INSERT INTO orders (product_id, quantity, total, charge_id)
+         VALUES ($1, $2, $3, $4)`,
+        req.ProductID, req.Quantity, total, ch.ID)
+
+    w.WriteHeader(http.StatusCreated)
+}
+```
+
+ทุกหลักการถูกละเมิดพร้อมกันหมด: มีเหตุผลให้เปลี่ยนแปลงถึงสี่ข้อ (**S**) คูปองใหม่หมายถึงการแก้ function นี้ (**O**) และมันพึ่งพา `pgxpool` กับ `stripe` โดยตรง จึงทดสอบไม่ได้เลยหากไม่มีฐานข้อมูลและบัญชี Stripe (**D**) **I** ยังไม่เกี่ยวข้องตอนนี้ — เพราะที่นี่ยังไม่มี interface เลยสักตัว — แต่มันคือสิ่งที่จะกำหนดรูปร่างของ interface เหล่านั้นเมื่อเราเริ่มนำมันเข้ามาใช้
+
+หลัง refactor:
+
+```go showLineNumbers title="internal/order/service.go"
+package order
+
+// I + D: each interface is small and defined here, by the consumer.
+type ProductStore interface {
+    PriceOf(ctx context.Context, productID int64) (int64, error)
+}
+
+type OrderStore interface {
+    Create(ctx context.Context, o *Order) error
+}
+
+type PaymentGateway interface {
+    Charge(ctx context.Context, token string, amountCents int64) (*Charge, error)
+}
+
+// O: new discounts are new implementations, not edits.
+type DiscountRule interface {
+    Apply(coupon string, subtotal int64) int64
+}
+
+type Service struct {
+    products  ProductStore
+    orders    OrderStore
+    payments  PaymentGateway
+    discounts DiscountRule
+}
+
+// S: one reason to change — the rules of placing an order.
+func (s *Service) Place(ctx context.Context, req PlaceRequest) (*Order, error) {
+    if req.Quantity <= 0 {
+        return nil, ErrInvalidQuantity
+    }
+
+    price, err := s.products.PriceOf(ctx, req.ProductID)
+    if err != nil {
+        return nil, fmt.Errorf("looking up price: %w", err)
+    }
+
+    total := s.discounts.Apply(req.Coupon, price*int64(req.Quantity))
+
+    charge, err := s.payments.Charge(ctx, req.CardToken, total)
+    if err != nil {
+        return nil, fmt.Errorf("charging card: %w", err)
+    }
+
+    o := &Order{
+        ProductID: req.ProductID,
+        Quantity:  req.Quantity,
+        Total:     total,
+        ChargeID:  charge.ID,
+    }
+    if err := s.orders.Create(ctx, o); err != nil {
+        return nil, fmt.Errorf("saving order: %w", err)
+    }
+    return o, nil
+}
+```
+
+handler เล็กลงจนเหลือแค่สิ่งที่ handler ควรจะเป็น — แปลระหว่าง HTTP กับ domain:
+
+```go showLineNumbers title="internal/httpapi/order.go"
+func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req order.PlaceRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid body", http.StatusBadRequest)
+        return
+    }
+
+    o, err := h.svc.Place(r.Context(), req)
+    switch {
+    case errors.Is(err, order.ErrInvalidQuantity):
+        http.Error(w, err.Error(), http.StatusBadRequest)
+    case errors.Is(err, order.ErrPaymentDeclined):
+        http.Error(w, err.Error(), http.StatusPaymentRequired)
+    case err != nil:
+        slog.Error("placing order", "err", err)
+        http.Error(w, "internal error", http.StatusInternalServerError)
+    default:
+        w.WriteHeader(http.StatusCreated)
+        json.NewEncoder(w).Encode(o)
+    }
+}
+```
+
+และตอนนี้ business logic ก็ทดสอบได้ในระดับมิลลิวินาที โดยไม่ต้องมีฐานข้อมูลหรือบัญชี Stripe เลย:
+
+```go showLineNumbers title="internal/order/service_test.go"
+func TestPlace_AppliesDiscount(t *testing.T) {
+    svc := &Service{
+        products:  fakeProducts{price: 1000},
+        orders:    &fakeOrders{},
+        payments:  &fakePayments{},
+        discounts: PercentOff{Coupon: "SAVE10", Percent: 10},
+    }
+
+    o, err := svc.Place(context.Background(), PlaceRequest{
+        ProductID: 1, Quantity: 2, Coupon: "SAVE10",
+    })
+    if err != nil {
+        t.Fatalf("Place() error = %v", err)
+    }
+    if o.Total != 1800 {
+        t.Errorf("Total = %d, want 1800", o.Total)
+    }
+}
+```
+
+test ตัวนั้นคือผลตอบแทนที่แท้จริง กลยุทธ์การ testing มีหน้าของตัวเองอยู่ใน [Golang Best Practices](/docs/testing)
+
+## Best practices
+
+- **ใช้ SOLID เป็นเครื่องมือวินิจฉัย ไม่ใช่ checklist** เมื่อการเปลี่ยนแปลงหนึ่งครั้งเจ็บปวด ให้ชี้ว่าหลักการไหนอธิบายเหตุผลนั้นได้
+- **"เหตุผลให้เปลี่ยนแปลงเดียว" ดีกว่า "ทำสิ่งเดียว"** ถามว่าใครเป็นคนขอให้เปลี่ยนแปลง
+- **รักษา interface ไว้ที่ 1–3 method** นิยามไว้ใน package ฝั่งผู้ใช้งาน
+- **implementation ทุกตัวต้องเคารพ contract** — ห้าม panic ห้ามทำอะไรเงียบ ๆ โดยไม่มีผล เขียนความหมายของ error ไว้บน interface
+- **wire dependency ใน `main.go`** constructor parameter คือทั้งหมดที่ DI ใน Go ต้องการ
+- **อย่า abstract ตั้งแต่ instance แรก** สอง implementation (หรือหนึ่งบวก test fake) เป็นเหตุผลที่เพียงพอให้มี interface หนึ่งตัวไม่พอ
+- **ระวัง package `utils`/`common`** — เป็นความล้มเหลวของ Single Responsibility ที่รับประกันได้เลย
+- **ถ้า test ต้องมีฐานข้อมูลเพื่อตรวจสอบกฎทางธุรกิจ นั่นคือปัญหา Dependency Inversion** ไม่ใช่ปัญหาการ testing
+
+<CardGrid>
+  <Card
+    title="Code Organization →"
+    href="/docs/code-organization"
+    description="เปลี่ยนหลักการเหล่านี้ให้เป็นโครงสร้างโปรเจกต์ Go จริง"
+  />
+</CardGrid>

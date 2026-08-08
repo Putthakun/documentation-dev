@@ -1,0 +1,128 @@
+---
+title: เริ่มต้นและติดตั้ง
+description: ทำไม backend ถึงใช้ Go, วิธีติดตั้ง และคำสั่ง toolchain ที่คุณจะรันทุกวัน
+keywords: ["golang", "install go", "go mod init", "go run", "go build", "gofmt", "go vet"]
+---
+
+## ทำไมต้อง Go สำหรับงาน backend
+
+Go ถูกสร้างขึ้นที่ Google เพื่อแก้ปัญหาที่เฉพาะเจาะจง: codebase ขนาดใหญ่ที่มีวิศวกรจำนวนมากเริ่มคอมไพล์ช้าและรักษาความสม่ำเสมอได้ยาก การตัดสินใจออกแบบทั้งหมดเป็นผลมาจากปัญหานั้น:
+
+- **คอมไพล์เป็น static binary ตัวเดียว** ไม่มี runtime ไม่มี interpreter ไม่มีปัญหา dependency บน server การ deploy คือการก็อปปี้ไฟล์เดียว — ซึ่งเป็นเหตุผลที่ container ของ Go มีขนาดเล็กมากได้ด้วย
+- **คอมไพล์เร็ว** การ build ใช้เวลาแค่ไม่กี่วินาที ทำให้ loop ของ edit → run ยังคงกระชับ
+- **Concurrency ถูกฝังอยู่ในตัวภาษา** Goroutine และ channel ทำให้การจัดการ request จำนวนมากพร้อมกันเป็นเรื่องธรรมชาติ (จะพูดถึงในหัวข้อ [Concurrency](/docs/concurrency) ในภายหลัง)
+- **เล็กโดยตั้งใจ** ไม่มี inheritance ไม่มี generics จนกระทั่งเมื่อไม่นานมานี้ มี loop keyword แค่ตัวเดียว มีสิ่งที่ต้องถกเถียงกันใน code review น้อยลง
+- **มี formatter อย่างเป็นทางการตัวเดียว** `gofmt` ยุติข้อถกเถียงเรื่อง formatting ทั้งหมด — ทุก codebase ของ Go หน้าตาเหมือนกันหมด
+
+ข้อแลกเปลี่ยนคือความยืดยาว: Go บังคับให้คุณเขียน error handling ออกมาอย่างชัดเจนและหลีกเลี่ยง abstraction ที่ซับซ้อน สิ่งนี้จะรู้สึกน่าเบื่อในตอนแรก แต่จะคุ้มค่าเมื่อคุณต้องอ่านโค้ดที่ไม่คุ้นเคยตอนตีสอง
+
+## การติดตั้ง Go
+
+<Tabs defaultValue="mac" className="pt-5 pb-1">
+  <TabsList>
+    <TabsTrigger value="mac">macOS</TabsTrigger>
+    <TabsTrigger value="linux">Linux</TabsTrigger>
+    <TabsTrigger value="check">Verify</TabsTrigger>
+  </TabsList>
+  <TabsContent value="mac">
+```bash showLineNumbers
+brew install go
+```
+  </TabsContent>
+  <TabsContent value="linux">
+```bash showLineNumbers
+# Download the latest tarball from https://go.dev/dl/ then:
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin   # add this to ~/.bashrc or ~/.zshrc
+```
+  </TabsContent>
+  <TabsContent value="check">
+```bash showLineNumbers
+go version
+go env GOPATH
+```
+  </TabsContent>
+</Tabs>
+
+## โปรแกรมแรกของคุณ
+
+ทุกโปรเจกต์ Go เริ่มต้นด้วยการ initialize module โดย module path มักจะเป็น URL ของ repository — เพราะนั่นคือวิธีที่โค้ดอื่น import package ของคุณ
+
+<Step>
+  <StepItem title="สร้าง module">
+    ```bash
+    mkdir hello && cd hello
+    go mod init github.com/yourname/hello
+    ```
+
+    คำสั่งนี้จะสร้างไฟล์ `go.mod` ที่ track module path, เวอร์ชัน Go และ dependencies ของคุณ
+  </StepItem>
+
+  <StepItem title="เขียน main.go">
+    ```go showLineNumbers title="main.go"
+    package main
+
+    import "fmt"
+
+    func main() {
+        fmt.Println("Hello, backend!")
+    }
+    ```
+
+    `package main` บวกกับ `func main()` เป็นตัวบ่งบอกว่านี่คือโปรแกรมที่รันได้ ไม่ใช่ library
+  </StepItem>
+
+  <StepItem title="รันโปรแกรม">
+    ```bash
+    go run .
+    ```
+  </StepItem>
+</Step>
+
+## Toolchain
+
+เครื่องมือเหล่านี้มาพร้อมกับ Go อยู่แล้ว — ไม่ต้องติดตั้งเพิ่ม:
+
+| Command | สิ่งที่มันทำ |
+|---|---|
+| `go run .` | คอมไพล์และรันในขั้นตอนเดียว ใช้บ่อยมากระหว่างพัฒนา |
+| `go build` | คอมไพล์เป็น binary ใน directory ปัจจุบัน |
+| `go build -o bin/app ./cmd/api` | คอมไพล์ package ที่ระบุไปยัง output path ที่กำหนดชื่อไว้ |
+| `go test ./...` | รันเทสต์ทั้งหมดใน module (`./...` หมายถึง "package นี้และทุกอย่างที่อยู่ข้างใต้") |
+| `go fmt ./...` | จัดรูปแบบโค้ดใหม่ตาม style มาตรฐาน |
+| `go vet ./...` | รายงานโครงสร้างที่น่าสงสัยซึ่ง compiler อนุญาต แต่มีแนวโน้มจะเป็น bug |
+| `go mod tidy` | เพิ่ม dependency ที่ขาดหายไปและลบตัวที่ไม่ได้ใช้ออกจาก `go.mod` |
+| `go get example.com/pkg` | เพิ่มหรืออัปเกรด dependency |
+
+## Cross-compiling
+
+หนึ่งใน trick ที่มีประโยชน์ที่สุดของ Go สำหรับ production — build binary สำหรับ Linux จาก Mac ของคุณ:
+
+```bash showLineNumbers
+GOOS=linux GOARCH=amd64 go build -o bin/app ./cmd/api
+```
+
+ไม่จำเป็นต้องมี cross-compiler toolchain นี่คือเหตุผลที่ Go เข้ากันได้ดีกับ Docker และ CI pipeline
+
+## แนวทางปฏิบัติที่ดี
+
+- **รัน `go fmt` ตอน save** ตั้งค่า editor ให้ทำอัตโนมัติ — อย่า format โค้ด Go ด้วยมือ
+- **รัน `go vet ./...` ก่อน commit** มันจับ bug จริง (printf verb ที่ผิด, unreachable code, การ copy lock) ที่คอมไพล์ผ่านได้ปกติ
+- **ใช้ URL ของ repo เป็น module path เสมอ** แม้แต่โปรเจกต์ส่วนตัว การเปลี่ยนทีหลังหมายถึงต้องอัปเดตทุก import
+- **Commit ทั้ง `go.mod` และ `go.sum`** `go.sum` มี checksum ที่รับประกันว่าทุกคน build โค้ด dependency ตัวเดียวกันทุกประการ
+- **รัน `go mod tidy` หลังเพิ่มหรือลบ import** เพื่อรักษา dependency ให้ตรงกับความเป็นจริง
+
+<Note title="จะไปหาข้อมูลได้ที่ไหน" type="success">
+  เอกสาร standard library ที่ [pkg.go.dev](https://pkg.go.dev/std) มีคุณภาพดีจริง ๆ
+  และคุ้มค่าที่จะอ่านโดยตรง standard library ของ Go ครอบคลุมทั้ง HTTP server, JSON, SQL, crypto และ testing
+  มาให้พร้อมใช้ — ลองใช้มันก่อนที่จะเพิ่ม dependency ใหม่
+</Note>
+
+<CardGrid>
+  <Card
+    title="Variables, Types & Constants →"
+    href="/docs/golang-fundamentals/variables-types"
+    description="การประกาศตัวแปร, zero values, การแปลงชนิดข้อมูล และ iota"
+  />
+</CardGrid>

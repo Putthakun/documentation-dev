@@ -1,0 +1,180 @@
+---
+title: การ Query ข้อมูล
+description: SELECT, WHERE, ORDER BY, LIMIT, operator ต่างๆ และกฎของ NULL ที่ทำให้ทุกคนแปลกใจ
+keywords: ["select", "where", "order by", "limit", "offset", "null", "like", "distinct", "sql query"]
+---
+
+## SELECT
+
+```sql showLineNumbers
+SELECT id, name, email FROM users;
+
+SELECT * FROM users;              -- all columns
+
+SELECT name AS full_name FROM users;   -- rename output column
+```
+
+<Note title="หลีกเลี่ยง SELECT * ใน application code" type="warning">
+  `SELECT *` ใช้ได้สบายๆ ตอนสำรวจข้อมูลใน `psql` แต่ในโค้ดมันจะดึงคอลัมน์ที่คุณไม่ต้องการมาด้วย
+  และจะพังแบบเงียบๆ เมื่อมีใครเพิ่มหรือสลับลำดับคอลัมน์ ให้ระบุคอลัมน์ที่คุณต้องการจริงๆ —
+  query จะกลายเป็นเอกสารบอกชัดเจนว่าโค้ดของคุณพึ่งพาอะไรบ้าง
+</Note>
+
+## WHERE
+
+```sql showLineNumbers
+SELECT * FROM users WHERE id = 1;
+SELECT * FROM orders WHERE quantity > 5;
+SELECT * FROM orders WHERE status != 'cancelled';
+
+-- Combine with AND / OR, and use parentheses to be explicit
+SELECT * FROM orders
+WHERE status = 'paid'
+  AND (quantity > 10 OR created_at > now() - INTERVAL '7 days');
+```
+
+### Comparison operator
+
+| Operator | ความหมาย |
+|---|---|
+| `=` `!=` (หรือ `<>`) | เท่ากับ, ไม่เท่ากับ |
+| `<` `>` `<=` `>=` | เปรียบเทียบลำดับ |
+| `BETWEEN a AND b` | ช่วงแบบรวมค่าปลายทั้งสองด้าน |
+| `IN (...)` | ตรงกับค่าใดค่าหนึ่งในลิสต์ |
+| `LIKE` / `ILIKE` | จับคู่รูปแบบ (`ILIKE` ไม่สนตัวพิมพ์เล็ก-ใหญ่) |
+| `IS NULL` / `IS NOT NULL` | ตรวจสอบค่า null |
+
+```sql showLineNumbers
+SELECT * FROM orders WHERE quantity BETWEEN 1 AND 10;
+SELECT * FROM orders WHERE status IN ('paid', 'shipped');
+SELECT * FROM users WHERE email LIKE '%@example.com';
+SELECT * FROM users WHERE name ILIKE 'ali%';       -- matches "Alice", "alice"
+```
+
+pattern ของ `LIKE` ใช้ `%` แทน "ตัวอักษรกี่ตัวก็ได้ต่อกัน" และ `_` แทน "ตัวอักษรตัวเดียวเป๊ะๆ"
+
+<Note title="Wildcard นำหน้าใช้ index ไม่ได้" type="warning">
+  `LIKE 'ali%'` ใช้ index ปกติได้ แต่ `LIKE '%ali%'` ใช้ไม่ได้ — มันต้องสแกนทุกแถว ซึ่งจะช้ามากเมื่อ
+  ตารางมีขนาดใหญ่ สำหรับการค้นหาข้อความจริงๆ ให้ใช้ full-text search ของ PostgreSQL หรือ trigram index
+  แทนการใช้ `%...%` เนื้อหาส่วนนี้อยู่ใน [PostgreSQL Advanced](/docs/postgresql-advanced)
+</Note>
+
+## การจัดการ NULL
+
+`NULL` หมายถึง "ไม่ทราบค่า" ไม่ใช่ "ค่าว่าง" — และเรื่องนี้ก่อผลตามมาที่ทำให้ทุกคนพลาดอย่างน้อยครั้งหนึ่ง
+
+```sql showLineNumbers
+-- These NEVER match, even for rows where the column IS null:
+SELECT * FROM users WHERE phone = NULL;    -- returns nothing
+SELECT * FROM users WHERE phone != NULL;   -- returns nothing
+
+-- Correct:
+SELECT * FROM users WHERE phone IS NULL;
+SELECT * FROM users WHERE phone IS NOT NULL;
+```
+
+การเปรียบเทียบใดๆ กับ `NULL` จะได้ผลลัพธ์เป็น `NULL` (ไม่ใช่ true ไม่ใช่ false) และ `WHERE` จะเก็บเฉพาะแถวที่เงื่อนไขเป็น *true* เท่านั้น
+
+<Note title="NULL ทำให้แถวถูกตัดออกจาก NOT IN และการปฏิเสธเงื่อนไข" type="danger">
+  นี่คือจุดที่ละเอียดอ่อน ถ้า subquery หรือ list มี `NULL` อยู่ `NOT IN` จะคืนค่า **ไม่มีแถวเลย**:
+
+  ```sql
+  -- If any user_id in orders is NULL, this returns nothing:
+  SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM orders);
+  ```
+
+  กับดักเดียวกันนี้เกิดกับ `WHERE status != 'cancelled'` ซึ่งจะตัดแถวที่ `status` เป็น `NULL` ออกไปแบบเงียบๆ
+  ใช้ `NOT EXISTS` แทน `NOT IN` และเขียนให้ชัดเจนเมื่อ null ควรถูกนับรวมด้วย:
+
+  ```sql
+  SELECT * FROM orders WHERE status != 'cancelled' OR status IS NULL;
+  ```
+
+  นี่เป็นเหตุผลหนักแน่นข้อหนึ่งที่ควรทำให้คอลัมน์เป็น `NOT NULL` ทุกที่ที่ทำได้
+</Note>
+
+`COALESCE` คืนค่าอาร์กิวเมนต์ตัวแรกที่ไม่ใช่ null — เป็นวิธีมาตรฐานในการกำหนดค่าสำรอง:
+
+```sql showLineNumbers
+SELECT name, COALESCE(phone, 'not provided') AS phone FROM users;
+```
+
+## ORDER BY
+
+```sql showLineNumbers
+SELECT * FROM users ORDER BY created_at DESC;
+SELECT * FROM users ORDER BY name ASC;             -- ASC is the default
+SELECT * FROM orders ORDER BY status, created_at DESC;  -- multiple keys
+
+-- Control where nulls land
+SELECT * FROM users ORDER BY phone NULLS LAST;
+```
+
+## LIMIT และ OFFSET
+
+```sql showLineNumbers
+SELECT * FROM users ORDER BY id LIMIT 10;             -- first 10
+SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 20;   -- page 3
+```
+
+<Note title="ใช้ ORDER BY คู่กับ LIMIT เสมอ" type="danger">
+  ถ้าไม่มี `ORDER BY` PostgreSQL **ไม่รับประกัน** ลำดับของแถวเลย — ดังนั้น "10 แถวแรก" อาจแตกต่างกัน
+  ในแต่ละครั้งที่รัน และการทำ pagination ก็จะเกิดข้อมูลซ้ำหรือขาดหายไป การใช้ `LIMIT` โดยไม่มี `ORDER BY`
+  แทบจะถือว่าเป็นบั๊กเสมอ
+
+  นอกจากนี้ `OFFSET` จะยิ่งช้าลงเมื่อค่ายิ่งมาก: `OFFSET 100000` จะทำให้ฐานข้อมูลต้องไล่อ่านและทิ้ง
+  100,000 แถวทิ้งไป สำหรับการแบ่งหน้าลึกๆ ให้ใช้ keyset pagination แทน:
+
+  ```sql
+  SELECT * FROM users WHERE id > $1 ORDER BY id LIMIT 10;
+  ```
+</Note>
+
+## DISTINCT
+
+```sql showLineNumbers
+SELECT DISTINCT status FROM orders;
+SELECT DISTINCT user_id, status FROM orders;   -- distinct combinations
+```
+
+## ลำดับการประมวลผลเชิงตรรกะ
+
+SQL ไม่ได้รันตามลำดับที่คุณเขียน การรู้ลำดับที่แท้จริงช่วยอธิบาย error ที่งงๆ ได้หลายกรณี:
+
+<Mermaid chart="graph TD
+  F[FROM / JOIN] --> W[WHERE]
+  W --> G[GROUP BY]
+  G --> H[HAVING]
+  H --> S[SELECT]
+  S --> D[DISTINCT]
+  D --> O[ORDER BY]
+  O --> L[LIMIT / OFFSET]" />
+
+เพราะ `SELECT` รันหลัง `WHERE` alias ที่ตั้งไว้ใน `SELECT` จึงใช้ใน `WHERE` ไม่ได้:
+
+```sql showLineNumbers
+-- Error: column "full_name" does not exist
+SELECT name AS full_name FROM users WHERE full_name = 'alice';
+
+-- But ORDER BY runs after SELECT, so this works fine:
+SELECT name AS full_name FROM users ORDER BY full_name;
+```
+
+มันยังอธิบายด้วยว่าทำไม `WHERE` ถึงกรองด้วยค่า aggregate ไม่ได้ — นั่นคือหน้าที่ของ `HAVING` ซึ่งอธิบายใน [Aggregation](/docs/sql-postgresql-basics/aggregation)
+
+## แนวทางปฏิบัติที่ดี
+
+- **ระบุคอลัมน์อย่างชัดเจน** แทนการใช้ `SELECT *` ใน application code
+- **ใช้ `LIMIT` คู่กับ `ORDER BY` เสมอ**
+- **ใช้ `IS NULL` / `IS NOT NULL`** ห้ามใช้ `= NULL`
+- **เลือกใช้ `NOT EXISTS` แทน `NOT IN`** เมื่อ subquery อาจให้ค่า null ออกมา
+- **ใช้ keyset pagination** แทนค่า `OFFSET` ที่สูงๆ
+- **จัด format query หลายบรรทัด** โดยให้ keyword ขึ้นต้นแต่ละบรรทัด — คุณจะอ่านโค้ดพวกนี้บ่อยกว่าที่เขียนมันมาก
+
+<CardGrid>
+  <Card
+    title="Joins →"
+    href="/docs/sql-postgresql-basics/joins"
+    description="การรวมแถวข้ามตาราง"
+  />
+</CardGrid>

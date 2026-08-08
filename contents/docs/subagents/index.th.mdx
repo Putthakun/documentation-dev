@@ -1,0 +1,179 @@
+---
+title: Subagent
+description: การมอบหมายงานให้กับ context window แยกต่างหาก ที่มี system prompt, tools และ model เป็นของตัวเอง
+keywords: ["claude code subagents", ".claude/agents", "subagent frontmatter", "context isolation", "agent tool"]
+---
+
+## มันคืออะไร
+
+Subagent คือผู้ช่วยเฉพาะทางที่รันงานใน **context window ของตัวเอง** พร้อม system prompt ของ
+ตัวเอง การเข้าถึง tool ของตัวเอง และ permission ของตัวเอง — แยกออกจากบทสนทนาหลักของคุณ เมื่อ
+Claude เจองานที่ตรงกับ `description` ของ subagent มันจะมอบหมายงาน: subagent ทำงานอย่างอิสระและ
+ส่งกลับมาเป็นสรุป ในขณะที่ทุกอย่างที่มันอ่านหรือรันระหว่างทางจะไม่เข้ามาอยู่ใน context หลักของคุณ
+
+สิ่งนี้แก้ปัญหาที่เฉพาะเจาะจง: การสำรวจ codebase, การรัน test suite, หรือการ grep ผ่าน log
+สามารถสร้างข้อความหลายพันบรรทัดที่คุณจะไม่มีวันดูตรง ๆ และไม่อยากให้มันครอง context window ของคุณ
+ถาวร Subagent ดูดซับ noise นั้นและส่งกลับมาแค่ผลลัพธ์
+
+<Mermaid chart="graph TD
+  M[Main conversation] -->|delegates via Agent tool| S[Subagent: own context window]
+  S -->|reads files, runs commands,<br/>greps logs — all in ITS context| S
+  S -->|returns summary only| M
+  M -->|main context stays small| M2[Main conversation continues]" />
+
+Claude Code มาพร้อม subagent ในตัวสามตัวที่คุณจะเห็นถูกใช้อัตโนมัติ: **Explore** (read-only,
+ค้นหา codebase), **Plan** (read-only, ใช้ระหว่าง research ใน plan mode), และ **general-purpose**
+(เข้าถึง tool เต็มรูปแบบ สำหรับงานที่ต้องทั้งสำรวจและแก้ไข) คุณกำหนด subagent ของตัวเองสำหรับ
+อะไรก็ตามที่คุณมอบหมายซ้ำ ๆ ด้วยคำสั่งเดียวกัน ข้าม session
+
+## ใช้งานอย่างไร
+
+### เขียน subagent หนึ่งตัว
+
+Subagent คือไฟล์ markdown พร้อม YAML frontmatter เก็บไว้ใน `.claude/agents/` (scope โปรเจกต์)
+หรือ `~/.claude/agents/` (ส่วนตัว ทุกโปรเจกต์) วิธีที่เร็วที่สุดในการได้ subagent ที่มีรูปแบบ
+ถูกต้องคือการอธิบายมันแล้วให้ Claude เขียนไฟล์ให้:
+
+```text
+Create a personal code-improver subagent in ~/.claude/agents/ that scans
+files and suggests improvements for readability, performance, and best
+practices. Make it read-only and have it use Sonnet.
+```
+
+ซึ่งจะได้ผลลัพธ์ประมาณนี้:
+
+```markdown title="~/.claude/agents/code-improver.md"
+---
+name: code-improver
+description: Scans files and suggests improvements for readability, performance, and best practices. Use after writing or modifying code.
+tools: Read, Grep, Glob
+model: sonnet
+---
+
+You are a code improvement specialist. For each issue you find, explain
+the problem, show the current code, and provide an improved version.
+```
+
+เนื้อหาคือ system prompt **ทั้งหมด** ของ subagent — subagent ไม่ได้สืบทอด system prompt default
+ของ Claude Code เลย มีแค่ไฟล์นี้บวกกับข้อมูล environment พื้นฐานอย่าง working directory เท่านั้น
+
+### Frontmatter fields
+
+มีแค่ `name` และ `description` เท่านั้นที่จำเป็น
+
+| Field | หน้าที่ |
+|---|---|
+| `name` | ตัวระบุที่ไม่ซ้ำกัน (ตัวพิมพ์เล็ก, ขีดกลาง) ห้ามมี colon — สงวนไว้สำหรับชื่อ scope plugin อย่าง `my-plugin:reviewer` |
+| `description` | subagent นี้มีไว้ทำอะไร — นี่คือสิ่งที่ Claude เอาไปเทียบกับงานเพื่อตัดสินใจว่าจะมอบหมายหรือไม่ |
+| `tools` | Allowlist ของ tool ที่ subagent ใช้ได้ ไม่ระบุ = สืบทอดทุกอย่างที่ subagent เข้าถึงได้ |
+| `disallowedTools` | Denylist ที่ใช้ *ก่อน* จะ resolve `tools` กับสิ่งที่เหลืออยู่ |
+| `model` | `sonnet`, `opus`, `haiku`, `fable`, model ID เต็ม, หรือ `inherit` (default) กำหนดงานที่ราคาถูกและ scope ชัดเจนไปยัง model เล็กกว่าตรงนี้ |
+| `permissionMode` | `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, หรือ `plan` |
+| `skills` | Skills ที่ **เนื้อหาเต็ม** จะถูก preload เข้า context ของ subagent ตอนเริ่ม — ดู [Agent Skills](/docs/agent-skills) |
+| `mcpServers` | MCP server ที่ scope เฉพาะ subagent นี้ เชื่อมต่อตอนเริ่มและปิดตอนจบ |
+| `maxTurns` | เพดานตายตัวของจำนวน agentic turn ก่อน subagent จะหยุด |
+| `isolation: worktree` | รัน subagent บน git worktree ชั่วคราวแทนที่ working copy ของคุณ |
+| `memory` | `user`, `project`, หรือ `local` — ให้ subagent มี directory ถาวรที่อ่าน/เขียนข้าม session ได้ |
+
+### การมอบหมายงานเกิดขึ้นอย่างไร
+
+สามวิธีในการ trigger subagent ไล่ระดับจากข้อเสนอที่ Claude เพิกเฉยได้ ไปจนถึง default ทั้ง session:
+
+1. **ภาษาธรรมชาติ** — เอ่ยชื่อมันใน prompt ("use the test-runner subagent to fix failing
+   tests"); Claude ตัดสินใจเองว่าจะมอบหมายจริงหรือไม่
+2. **@-mention** — `@code-reviewer look at the auth changes` รับประกันว่า subagent ตัวนั้นจะรัน
+   งานนี้แน่นอน แทนที่จะปล่อยให้ Claude เลือก
+3. **ทั้ง session** — `claude --agent code-reviewer` (หรือ key `"agent"` ใน
+   `.claude/settings.json`) ทำให้ system prompt, tools, และ model ของ subagent กลายเป็น default
+   ของ session หลักตลอดทั้ง session
+
+Subagent สืบทอด tool ที่ subagent โดยทั่วไปเข้าถึงได้ ถูกจำกัดลงด้วย `tools` /
+`disallowedTools` ที่คุณตั้ง และถูกจำกัดเพิ่มอีกถ้ามันรันใน background (default ในเวอร์ชันล่าสุด)
+— background subagent มีชุด tool ในตัวที่เล็กกว่า foreground subagent แม้ทุก permission prompt
+ที่มันเจอจะยังปรากฏใน session หลักให้คุณอนุมัติหรือปฏิเสธ
+
+## แนวทางที่ดี
+
+- **เขียน `description` ให้เจาะจง** มันคือสิ่งเดียวที่ Claude ใช้เทียบตอนตัดสินใจว่าจะมอบหมายเอง
+  หรือไม่ — description ที่คลุมเครือหมายถึงการมอบหมายที่คลุมเครือ (หรือไม่มีเลย) เพิ่ม "use
+  proactively" ถ้าคุณอยากให้ Claude หยิบมันมาใช้โดยไม่ต้องถูกขอ
+- **จำกัด `tools` ให้เหลือแค่ที่งานต้องการจริง ๆ** Subagent ที่แค่ค้นหาโค้ดไม่ควรมี `Write` หรือ
+  `Edit` — นี่คือสัญชาตญาณเดียวกับ least-privilege IAM policy ที่นำมาใช้กับ agent แทนที่จะเป็น
+  service account
+- **ส่งงานไปยัง model ที่ถูกกว่าเมื่องานไม่ต้องการ reasoning ของ model หลัก** การคัดกรอง log
+  การ grep เชิงกลไก และการสรุปแบบท่องจำ เหมาะกับ `model: haiku`
+- **Commit subagent definition เข้า version control** เมื่อมันเฉพาะเจาะจงกับโปรเจกต์ — session
+  ของเพื่อนร่วมทีมควรได้ researcher ที่ scope ชัดเจนตัวเดียวกับที่คุณสร้าง ไม่ต้องมานั่งสร้างใหม่
+  จากความจำ
+- **อย่ารันทุกอย่างผ่าน subagent** การอ่านไฟล์เร็ว ๆ หรือ edit สองบรรทัดควรอยู่ในบทสนทนาหลัก —
+  การมอบหมายมันเพิ่ม round-trip overhead โดยไม่ได้ประโยชน์จาก isolation เลย ใช้ subagent เมื่อ
+  *ปริมาณ* ของ output ระหว่างทาง — ไม่ใช่ความสำคัญของงาน — คือสิ่งที่คุณพยายามกันออกจาก context
+  หลัก
+
+### Subagents vs. skills vs. คำสั่งธรรมดา
+
+<Mermaid chart="graph TD
+  Q{What's the problem?} -->|I keep re-explaining a procedure| SK[Skill: reusable instructions,<br/>same context]
+  Q -->|This would flood my context<br/>with output I won't reuse| SA[Subagent: separate context,<br/>own tools/model]
+  Q -->|One-off, small, this session only| PI[Just say it inline]" />
+
+คำถามตัดสินคือ **ปริมาณของ output ระหว่างทาง** ไม่ใช่ความซับซ้อน เนื้อหาของ skill โหลดเข้า
+context *ที่มีอยู่แล้ว* ของคุณและอยู่ตรงนั้นต่อไป Subagent ได้ context window แยกต่างหากทั้งหมด
+และส่งกลับมาแค่สรุป — นั่นคือ isolation ที่ grep sweep ใหญ่ ๆ หรือการรัน test suite เต็มรูปแบบ
+ต้องการจริง ๆ คำสั่งครั้งเดียวที่ไม่เกิดซ้ำไม่คุ้มที่จะทำให้เป็นทางการแบบใดแบบหนึ่ง
+
+มันทำงานร่วมกันได้มากกว่าจะแทนที่กัน: skill ที่มี `context: fork` รันคำสั่งของมันภายใน subagent
+เพื่อ isolation และ field `skills:` ของ subagent จะ preload เนื้อหา skill เป็นข้อมูลอ้างอิงเข้า
+system prompt ของ subagent นั้น ดู
+[Agent Skills](/docs/agent-skills#skills-vs-slash-commands-subagents-and-mcp) สำหรับตาราง
+เปรียบเทียบเต็มรวมถึง MCP
+
+## ตัวอย่างจริง
+
+Subagent สำหรับฐานข้อมูลแบบ read-only เท่านั้น scope ไว้ให้ query ได้แต่ mutate ไม่ได้ — hook
+`PreToolUse` บังคับขอบเขตนี้ที่ระดับคำสั่ง แทนที่จะพึ่ง system prompt เพียงอย่างเดียว:
+
+```markdown title=".claude/agents/db-reader.md"
+---
+name: db-reader
+description: Execute read-only database queries for debugging and investigation. Use when the user needs to check data without modifying it.
+tools: Bash
+model: haiku
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "./scripts/validate-readonly-query.sh"
+---
+
+You investigate data issues by running read-only SQL queries. Explain what you're
+querying and why before running it. Never attempt a write — if the task requires
+one, say so and stop.
+```
+
+```bash showLineNumbers title="scripts/validate-readonly-query.sh"
+#!/bin/bash
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+
+if echo "$COMMAND" | grep -iE '\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE)\b' > /dev/null; then
+  echo "Blocked: Only SELECT queries are allowed" >&2
+  exit 2
+fi
+
+exit 0
+```
+
+สองชั้นของการจำกัดตรงนี้: `tools: Bash` (ไม่มีอะไรอื่นเลย เพื่อไม่ให้มันไขว่คว้า `Write` ได้)
+บวกกับ hook ที่ตรวจสอบทุกคำสั่ง Bash ก่อนมันจะรัน System prompt ขอความร่วมมืออย่างสุภาพ ส่วน
+hook คือสิ่งที่บังคับใช้จริง — นิสัยการวางชั้น trust แบบเดียวกับ [การประเมิน skill จากบุคคลที่สาม]
+(/docs/skills-ecosystem) นำมาใช้กับสิ่งที่คุณเขียนขึ้นเอง
+
+<CardGrid>
+  <Card
+    title="Agent Teams →"
+    href="/docs/agent-teams"
+    description="ประสานงานหลาย session ที่ Claude สร้างและดูแล แต่ละตัวมี context ของตัวเองอย่างอิสระ"
+  />
+</CardGrid>

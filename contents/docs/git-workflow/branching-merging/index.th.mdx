@@ -1,0 +1,97 @@
+---
+title: Branching และ Merging
+description: การแยกงานออกเป็น branch และนำกลับเข้า main ด้วย git merge
+keywords: ["git branch", "git checkout", "git switch", "git merge", "fast-forward", "feature branch"]
+---
+
+## ทำไมต้อง branch?
+
+branch คือตัวชี้ (pointer) ที่เคลื่อนที่ได้ ชี้ไปที่ commit หนึ่งๆ การแตก branch ทำให้คุณทำ feature หรือ fix แยกต่างหากได้ โดยไม่แตะโค้ดที่เสถียรบน `main` และไม่ทำให้งานที่ยังทำไม่เสร็จของคุณส่งผลกระทบต่อเพื่อนร่วมทีม
+
+## สร้างและสลับ branch
+
+```bash showLineNumbers
+git branch feature/rate-limiting     # สร้าง branch (ยังไม่สลับไป)
+git switch feature/rate-limiting     # สลับไปที่ branch นั้น
+# หรือทำในขั้นตอนเดียว:
+git switch -c feature/rate-limiting  # สร้างและสลับพร้อมกัน
+
+git branch                           # แสดงรายการ branch ในเครื่อง
+git branch -a                        # แสดง branch ทั้งในเครื่องและ remote
+```
+
+<Note title="checkout vs switch" type="success">
+  `git checkout <branch>` เป็นคำสั่งเก่าที่ทำได้หลายอย่าง (รวมถึงใช้กู้คืนไฟล์ด้วย) ส่วน `git
+  switch` และ `git restore` ถูกเพิ่มเข้ามาทีหลังเพื่อแยกพฤติกรรมที่ทับซ้อนกันนั้นออกเป็นสองคำสั่งที่ชัดเจน
+  แนะนำให้ใช้ `git switch` สำหรับการสลับ branch — ใช้ผิดได้ยากกว่า
+</Note>
+
+## โมเดลการแตก branch
+
+```bash showLineNumbers
+git switch -c feature/rate-limiting
+# ... แก้ไข, commit ...
+git add .
+git commit -m "feat: add token bucket rate limiter"
+```
+
+<Mermaid chart="gitGraph
+  commit id: 'init'
+  commit id: 'setup auth'
+  branch feature/rate-limiting
+  checkout feature/rate-limiting
+  commit id: 'add limiter'
+  commit id: 'add tests'
+  checkout main
+  commit id: 'fix typo'
+  merge feature/rate-limiting" />
+
+branch ของคุณแยกออกจาก `main` ตั้งแต่จุดที่คุณสร้างมันขึ้นมา คุณ commit ได้อย่างอิสระบน branch ของตัวเอง ขณะที่ `main` ก็อาจเคลื่อนไปเรื่อยๆ (คนอื่น merge งานของเขาเข้ามา) — Git จะติดตามประวัติทั้งสองฝั่งแยกกันจนกว่าคุณจะ merge
+
+## Merge
+
+เมื่อ feature branch ของคุณพร้อมแล้ว ให้ merge กลับเข้า `main`:
+
+```bash showLineNumbers
+git switch main
+git pull                       # ให้แน่ใจว่า main อัปเดตล่าสุดก่อน
+git merge feature/rate-limiting
+```
+
+มีผลลัพธ์ที่เป็นไปได้สองแบบ:
+
+- **Fast-forward merge** — ถ้า `main` ไม่ได้ขยับตั้งแต่คุณแตก branch ออกมา Git จะแค่เลื่อน pointer ของ `main` ไปข้างหน้า โดยไม่มี merge commit เกิดขึ้น
+- **Three-way merge** — ถ้า `main` *มีการขยับ* (คนอื่น merge ไปก่อนแล้ว) Git จะสร้าง **merge commit** ใหม่ที่มีสอง parent รวมประวัติทั้งสองฝั่งเข้าด้วยกัน
+
+```bash showLineNumbers
+git merge --no-ff feature/rate-limiting   # บังคับให้เกิด merge commit แม้จะทำ fast-forward ได้
+```
+
+<Note title="Best practice" type="success">
+  หลายทีมตั้งใจใช้ `--no-ff` กับ feature branch — เพื่อให้เห็นบันทึกชัดเจนใน `git log
+  --graph` ว่า feature ถูก merge เข้ามา *เมื่อไหร่* แม้ว่าตัว commit จะเรียงเป็นเส้นตรงก็ตาม
+  นี่เป็นเรื่องความชอบส่วนทีม ไม่ใช่กฎตายตัว — โปรเจกต์เล็กๆ คนเดียวมักไม่จำเป็นต้องใช้
+</Note>
+
+## ลบ branch หลัง merge
+
+```bash showLineNumbers
+git branch -d feature/rate-limiting     # ลบแบบปลอดภัย (จะปฏิเสธถ้ายังไม่ได้ merge)
+git branch -D feature/rate-limiting     # บังคับลบ (แม้ยังไม่ได้ merge)
+git push origin --delete feature/rate-limiting  # ลบบน remote ด้วย
+```
+
+## Best practices
+
+- **ตั้งชื่อ branch ให้บอกว่าทำอะไร:** `feature/rate-limiting`, `fix/nil-pointer-auth`, `chore/upgrade-deps` — ไม่ใช่ `test`, `new-branch`, `asdf`
+- **ให้ branch มีอายุสั้น** ยิ่ง branch อยู่นานโดยไม่ merge ยิ่งเบี่ยงเบนไปจาก `main` มากขึ้น และการ merge/resolve conflict ในภายหลังก็ยิ่งลำบากขึ้น
+- **pull `main` ก่อนแตก branch และก่อน merge อีกครั้ง** เพื่อให้แน่ใจว่าคุณทำงานจากโค้ดล่าสุด
+- **ลบ branch หลังจาก merge เสร็จ** repo ที่มี branch ค้างอยู่ 200 อันคือ repo ที่ไม่มีใครไว้ใจ
+
+<CardGrid>
+  <Card
+    title="Rebase vs Merge →"
+    href="/docs/git-workflow/rebase-vs-merge"
+    description="อีกวิธีหนึ่งในการรวมประวัติ — และควรใช้เมื่อไหร่"
+  />
+</CardGrid>

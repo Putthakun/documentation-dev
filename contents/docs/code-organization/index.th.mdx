@@ -1,0 +1,371 @@
+---
+title: การจัดระเบียบโค้ด
+description: วิธีจัดโครงสร้างโปรเจกต์ Go เมื่อมันเติบโตขึ้น
+keywords: ["go project layout", "package structure", "internal package", "circular dependency", "cmd"]
+---
+
+## โครงสร้างเป็นการตัดสินใจที่ควรเลื่อนออกไป
+
+ข้อผิดพลาดที่พบบ่อยที่สุดเมื่อเริ่มเขียน Go service ใหม่คือการเริ่มต้นด้วยโครงสร้างสิบสองไดเรกทอรีที่ก็อปมาจากบล็อกโพสต์
+สุดท้ายคุณจะต้องคอยดูแลรักษาขอบเขต (boundary) ที่ยังไม่มีความหมายอะไรจริง ๆ ในตอนนั้น
+
+โปรเจกต์ Go มีค่าใช้จ่ายในการจัดโครงสร้างใหม่ต่ำผิดปกติ เพราะ package คือไดเรกทอรี, import คือ path,
+และ `gopls` จะ rename ให้ทั้งสองอย่างให้เอง ดังนั้นกลยุทธ์ที่ตรงไปตรงมาคือ **เริ่มจากเล็ก ๆ แล้วค่อยแยกเมื่อเจอ
+pain point เฉพาะเจาะจง** หน้านี้จะพูดถึงการสังเกตความเจ็บปวดนั้น และรู้ว่าจะแยกแบบไหนถึงจะช่วยแก้ปัญหาได้
+
+กลไกของ package เอง — การตั้งชื่อ, `internal/`, `go mod` — อยู่ใน
+[Packages & Modules](/docs/golang-fundamentals/packages-modules) ส่วนคำถามเชิง *สถาปัตยกรรม* ว่า
+dependency ควรชี้ไปทางไหนอยู่ใน [Software Architecture Patterns](/docs/software-architecture-patterns)
+หน้านี้คือจุดกึ่งกลางเชิงปฏิบัติ: ไฟล์จริง ๆ ควรอยู่ตรงไหน
+
+## สามรูปแบบที่ service ผ่านไป
+
+Go backend เกือบทุกตัวจะผ่านสามรูปแบบนี้ตามลำดับ การเปลี่ยนแต่ละครั้งควรถูกกระตุ้นด้วยปัญหาจริง
+ไม่ใช่ตามปฏิทิน
+
+| รูปแบบ | ใช้ได้ดีจนถึง | ความเจ็บปวดที่ทำให้ต้องเปลี่ยน |
+|---|---|---|
+| Package เดียว | ~1,000 บรรทัด | หาอะไรไม่เจอ และทุกอย่างเรียกกันไปมาได้หมด |
+| แยกตาม layer | ~10,000 บรรทัด | เพิ่มฟีเจอร์เดียวต้องแก้สี่ package |
+| แยกตาม domain | ยาวนาน | สอง domain ต้องแยกเป็นคนละ service |
+
+### รูปแบบที่ 1 — package เดียว
+
+สำหรับ service เล็ก ๆ ไฟล์ไม่กี่ไฟล์ใน `main` ถือว่าถูกต้องจริง ๆ:
+
+<FileTree>
+  <Folder name="orders-api" defaultOpen>
+    <File name="main.go" />
+    <File name="handler.go" />
+    <File name="store.go" />
+    <File name="order.go" />
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+ทุกอย่างอยู่ใน package เดียว จึงไม่มีการตัดสินใจเรื่อง import และไม่มี cycle เกิดขึ้นได้เลย
+ไฟล์ยังเป็นเครื่องมือจัดระเบียบที่ใช้ได้จริง — `handler.go` และ `store.go` แยกความรับผิดชอบให้คนอ่านเห็นชัด
+แม้ว่า compiler จะมองว่าเป็น package เดียวก็ตาม
+
+<Note title="อย่าข้ามขั้นตอนนี้สำหรับ service เล็ก ๆ" type="success">
+  service 600 บรรทัดใน package เดียวอ่านง่ายกว่า แก้ง่ายกว่า และลบง่ายกว่าโค้ดปริมาณเท่ากันที่กระจาย
+  อยู่ในเก้าไดเรกทอรี ถ้าคุณยังจำภาพรวมทั้งหมดในหัวได้ นั่นคือข้อดี — รักษามันไว้จนกว่าโค้ดจะโตเกินจริง ๆ
+</Note>
+
+### รูปแบบที่ 2 — แยกตาม layer
+
+การแยกครั้งแรกที่ service ส่วนใหญ่ต้องการ แต่ละ package เก็บของ *ประเภท* เดียวกัน:
+
+<FileTree>
+  <Folder name="internal" defaultOpen>
+    <Folder name="handler">
+      <File name="order.go" />
+      <File name="user.go" />
+    </Folder>
+    <Folder name="service">
+      <File name="order.go" />
+      <File name="user.go" />
+    </Folder>
+    <Folder name="repository">
+      <File name="order_postgres.go" />
+      <File name="user_postgres.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+การทำแบบนี้จะได้กฎที่บังคับใช้ได้: `repository` จะ import `handler` ไม่ได้ ดังนั้น SQL จึงไม่มีทางรั่วไหลขึ้นไปข้างบน
+นี่คือคุณค่าที่แท้จริง และสำหรับหลาย service เรื่องก็จบแค่นี้
+
+ข้อจำกัดของมันจะปรากฏขึ้นเมื่อคุณเพิ่มฟีเจอร์ "เพิ่มการยกเลิกออเดอร์" หมายถึงต้องแตะ
+`handler/order.go`, `service/order.go`, และ `repository/order_postgres.go` — สาม package หนึ่งแนวคิด
+โค้ดที่เปลี่ยนพร้อมกันไม่ได้อยู่ด้วยกัน
+
+### รูปแบบที่ 3 — แยกตาม domain
+
+จัดโครงสร้างใหม่ตามสิ่งที่โค้ด *เกี่ยวกับ* แทนที่จะเป็นสิ่งที่มัน *เป็น*:
+
+<FileTree>
+  <Folder name="internal" defaultOpen>
+    <Folder name="order" defaultOpen>
+      <File name="order.go" />
+      <File name="service.go" />
+      <File name="postgres.go" />
+      <File name="http.go" />
+    </Folder>
+    <Folder name="user">
+      <File name="user.go" />
+      <File name="service.go" />
+      <File name="postgres.go" />
+      <File name="http.go" />
+    </Folder>
+  </Folder>
+</FileTree>
+
+ตอนนี้การยกเลิกออเดอร์อยู่ในไดเรกทอรีเดียว ขอบเขตของ package ก็มีความหมายมากขึ้นด้วย: `user` สามารถ
+เปิดเผย API เล็ก ๆ ให้ `order` ใช้และซ่อนส่วนที่เหลือ ซึ่งรูปแบบแยกตาม layer ทำไม่ได้ เพราะทุกอย่างใน
+`service` เป็น package เดียวกันหมด
+
+<Note title="นี่คือรูปแบบที่อยู่รอด" type="success">
+  Domain package ยังเป็นจุดต่อ (seam) ตามธรรมชาติหากคุณต้องแยก service ออกไปในอนาคต — `internal/order`
+  กลายเป็น module ของตัวเองได้ด้วย diff ที่เล็กกว่าการดึงหนึ่ง layer ออกจากสาม package มากนัก
+  คุณไม่จำเป็นต้องเริ่มจากตรงนี้ แต่มักจะจบลงที่นี่
+</Note>
+
+## การตั้งชื่อ
+
+กฎเดียวที่ส่งผลกระทบสูง: **ตั้งชื่อ package ตามสิ่งที่มันให้บริการ ไม่ใช่ตามสิ่งที่มันบรรจุ**
+`payment`, `auth`, `ratelimit` — ไม่ใช่ `utils`, `common`, `helpers`, หรือ `models` package ที่ตั้งชื่อ
+ตามหมวดหมู่ไม่มีเหตุผลที่จะปฏิเสธโค้ดใด ๆ เลย มันจึงโตไม่หยุดและทุกอย่างก็ import มันหมด
+[Packages & Modules](/docs/golang-fundamentals/packages-modules) พูดถึงเรื่องนี้และกฎของ
+`internal/` แบบครบถ้วน
+
+## การแก้ import cycle
+
+Go ปฏิเสธที่จะ compile import แบบวงกลม นี่คือฟีเจอร์ — มันคือ compiler กำลังบอกคุณว่า boundary ผิด —
+แต่ครั้งแรกที่เจอมันก็สร้างความสับสนได้จริง ๆ
+
+ตัวอย่างคลาสสิก: `order` ต้องใช้อีเมลของ user เพื่อส่งอีเมลยืนยัน และ `user` ต้องใช้จำนวนออเดอร์ของ user
+เพื่อตัดสิน tier ของเขา ต่างฝ่ายต่าง import กันและกัน ทำให้ build ล้มเหลว:
+
+<Mermaid chart="graph LR
+  O1[package order] -->|imports| U1[package user]
+  U1 -->|imports| O1" />
+
+วิธีแก้ไม่ใช่การสร้าง package `shared` ตัวที่สาม — นั่นแค่ย้ายปัญหาไปและสร้างถังขยะรวม (grab-bag)
+ที่คุณถูกเตือนไว้แล้ว แต่แทนที่จะทำแบบนั้น **ฝั่งผู้ใช้ (consumer) ประกาศ interface สำหรับสิ่งที่ตัวเองต้องการ**
+และฝั่งผู้ให้บริการ (provider) ก็ทำตาม interface นั้นแบบ implicit:
+
+<Mermaid chart="graph TD
+  M[main.go] -->|wires both| O2[package order]
+  O2 --> I[UserFinder interface<br/>declared in order]
+  U2[package user] -.->|satisfies| I" />
+
+```go showLineNumbers title="internal/order/service.go"
+package order
+
+// order does NOT import user. It states its requirement locally.
+type UserFinder interface {
+    EmailFor(ctx context.Context, userID int64) (string, error)
+}
+
+type Service struct {
+    users UserFinder
+    store Store
+}
+```
+
+```go showLineNumbers title="internal/user/service.go"
+package user
+
+// user knows nothing about order. It just has the method.
+func (s *Service) EmailFor(ctx context.Context, userID int64) (string, error) {
+    u, err := s.store.GetByID(ctx, userID)
+    if err != nil {
+        return "", err
+    }
+    return u.Email, nil
+}
+```
+
+```go showLineNumbers title="cmd/api/main.go"
+userSvc := user.NewService(userStore)
+orderSvc := order.NewService(orderStore, userSvc)   // satisfies order.UserFinder
+```
+
+ตอนนี้ลูกศรวิ่งทางเดียว ทั้งสอง package compile แยกกันได้ และ `order` สามารถทดสอบได้ด้วย fake สามบรรทัด
+นี่คือ [Dependency Inversion](/docs/solid-principles) ที่กำลังทำงานจริง
+
+<Note title="เมื่อ cycle หมายถึงอย่างอื่น" type="warning">
+  มีสาเหตุอีกสองอย่างที่ควรรู้จัก ถ้าสอง package แชร์ *type* กันจริง ๆ (ไม่ใช่ behavior) — เช่น struct
+  `Order` ที่ทั้งคู่ต้องใช้ — type นั้นอาจควรอยู่ใน package เล็ก ๆ ของตัวเองที่ไม่มี dependency อะไรเลย
+  และถ้าสอง package import กันไปมาตลอดเวลาทั้งสองทิศทาง มันอาจจะเป็น package เดียวกันที่คุณแยกเร็วเกินไป
+  การรวมกลับก็เป็นวิธีแก้ที่ใช้ได้เช่นกัน
+</Note>
+
+## Composition root
+
+ทุก dependency ในโปรแกรมถูกสร้างขึ้นในที่เดียวเท่านั้น: `main` ไม่มีที่ไหนอื่นสร้าง database pool,
+อ่าน environment variable, หรือตัดสินใจว่าจะใช้ implementation ไหน
+
+```go showLineNumbers title="cmd/api/main.go"
+func main() {
+    if err := run(); err != nil {
+        slog.Error("startup failed", "err", err)
+        os.Exit(1)
+    }
+}
+
+func run() error {
+    ctx := context.Background()
+
+    cfg, err := config.Load()
+    if err != nil {
+        return fmt.Errorf("loading config: %w", err)
+    }
+
+    pool, err := db.New(ctx, cfg.DatabaseURL)
+    if err != nil {
+        return fmt.Errorf("connecting to database: %w", err)
+    }
+    defer pool.Close()
+
+    // Wiring: adapters first, then the services that use them.
+    userStore := postgres.NewUserStore(pool)
+    orderStore := postgres.NewOrderStore(pool)
+
+    userSvc := user.NewService(userStore)
+    orderSvc := order.NewService(orderStore, userSvc)
+
+    srv := &http.Server{
+        Addr:    cfg.Addr,
+        Handler: httpapi.NewRouter(userSvc, orderSvc),
+    }
+    return srv.ListenAndServe()
+}
+```
+
+<Note title="ทำไมใช้ run() error แทนที่จะเขียนทุกอย่างใน main()" type="success">
+  `main` return error ไม่ได้ และ `os.Exit` จะข้าม `defer` ทุกตัวไปเลย การเอาโค้ดจริง ๆ ไปไว้ใน
+  `run() error` ทำให้ `defer pool.Close()` ถูกรันจริง ๆ, error มี exit path ที่สม่ำเสมอเดียว,
+  และ startup ทั้งหมดก็ทดสอบได้ เป็นนิสัยเล็ก ๆ ที่คุ้มค่าตั้งแต่ครั้งแรกที่คุณต้อง debug boot failure
+</Note>
+
+## Config
+
+โหลด configuration แค่ครั้งเดียวใน `main` ใส่ลงใน struct — อย่าเรียก `os.Getenv` ลึกเข้าไปข้างใน service
+service ที่อ่าน environment เองจะทดสอบด้วยค่าต่าง ๆ ไม่ได้ และซ่อน requirement ของมันจากผู้อ่าน
+
+```go showLineNumbers title="internal/config/config.go"
+package config
+
+type Config struct {
+    Addr        string
+    DatabaseURL string
+    LogLevel    string
+}
+
+func Load() (Config, error) {
+    cfg := Config{
+        Addr:     envOr("ADDR", ":8080"),
+        LogLevel: envOr("LOG_LEVEL", "info"),
+    }
+
+    cfg.DatabaseURL = os.Getenv("DATABASE_URL")
+    if cfg.DatabaseURL == "" {
+        return Config{}, errors.New("DATABASE_URL is required")
+    }
+    return cfg, nil
+}
+
+func envOr(key, fallback string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return fallback
+}
+```
+
+การล้มเหลวตั้งแต่ startup เมื่อขาด variable ที่จำเป็นคือสิ่งที่ถูกต้อง — ดีกว่า nil pointer ที่โผล่มา
+ยี่สิบนาทีหลัง production traffic เริ่มวิ่งมาก
+
+## ไฟล์ที่ไม่ใช่ Go ควรอยู่ตรงไหน
+
+<FileTree>
+  <Folder name="orders-api" defaultOpen>
+    <Folder name="cmd">
+      <Folder name="api">
+        <File name="main.go" />
+      </Folder>
+      <Folder name="migrate">
+        <File name="main.go" />
+      </Folder>
+    </Folder>
+    <Folder name="internal" />
+    <Folder name="migrations">
+      <File name="0001_create_users.up.sql" />
+      <File name="0001_create_users.down.sql" />
+    </Folder>
+    <Folder name="testdata">
+      <File name="order_response.golden.json" />
+    </Folder>
+    <File name="Makefile" />
+    <File name="Dockerfile" />
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+สองข้อตกลงที่ tooling รู้จักจริง ๆ: `cmd/<name>/main.go` จะให้คุณได้ binary หนึ่งตัวต่อหนึ่งไดเรกทอรีย่อย
+และ **`testdata/` จะถูก Go tool ละเว้น** — มันคือที่อยู่มาตรฐานสำหรับ fixture และ golden file
+ซึ่งพูดถึงใน [Testing](/docs/testing)
+
+## ตัวอย่างจริง
+
+โครงสร้างที่ครบสมบูรณ์ พร้อมเหตุผลของแต่ละ boundary แทนที่จะเป็นแค่กฎ:
+
+<FileTree>
+  <Folder name="orders-api" defaultOpen>
+    <Folder name="cmd" defaultOpen>
+      <Folder name="api">
+        <File name="main.go" />
+      </Folder>
+    </Folder>
+    <Folder name="internal" defaultOpen>
+      <Folder name="config">
+        <File name="config.go" />
+      </Folder>
+      <Folder name="order" defaultOpen>
+        <File name="order.go" />
+        <File name="service.go" />
+        <File name="service_test.go" />
+        <File name="errors.go" />
+      </Folder>
+      <Folder name="user">
+        <File name="user.go" />
+        <File name="service.go" />
+      </Folder>
+      <Folder name="postgres">
+        <File name="order_store.go" />
+        <File name="user_store.go" />
+      </Folder>
+      <Folder name="httpapi">
+        <File name="router.go" />
+        <File name="order_handler.go" />
+        <File name="middleware.go" />
+      </Folder>
+    </Folder>
+    <Folder name="migrations" />
+    <File name="go.mod" />
+  </Folder>
+</FileTree>
+
+- **`internal/order` และ `internal/user`** คือ domain — โค้ดที่เปลี่ยนพร้อมกัน
+- **`internal/postgres`** เป็น package เดียว ไม่ใช่หนึ่งตัวต่อหนึ่ง domain เพราะ connection pool
+  เดียวและชุด scan helper ที่ใช้ร่วมกันอยู่ที่นี่ มัน import domain package; domain package ไม่ import
+  มันกลับ
+- **`internal/httpapi`** เป็นเจ้าของทุกอย่างที่รู้เรื่อง HTTP: routing, status code, รูปแบบ JSON,
+  middleware ไม่มี package อื่นที่ import `net/http`
+- **`internal/config`** ถูก import โดย `main` เท่านั้น
+- **Test อยู่ข้าง ๆ โค้ดที่มันทดสอบ** ใน package เดียวกัน เพื่อให้เข้าถึงฟังก์ชันที่ไม่ได้ export ได้
+
+รูปร่างของ dependency graph สำคัญกว่าชื่อไดเรกทอรี: `httpapi` → `order` → (interface ที่มันประกาศไว้)
+โดยมี `postgres` และ `main` ชี้เข้ามาข้างใน ไม่มีอะไรชี้กลับออกไปข้างนอก
+
+## แนวทางปฏิบัติที่ดี
+
+- **เริ่มด้วย package เดียว** แยกเมื่อรู้สึกถึง pain point เฉพาะเจาะจง ไม่ใช่แยกล่วงหน้า
+- **เลือก domain package มากกว่า layer package** เมื่อ service มีมากกว่าหนึ่งแนวคิดจริง ๆ
+- **อย่าสร้าง `utils`, `common`, `helpers`, หรือ `models`** ตั้งชื่อ package ตามสิ่งที่มันให้บริการ
+- **แก้ cycle ด้วย interface ที่ฝั่ง consumer ประกาศ** ไม่ใช่ด้วย shared package
+- **ประกอบทุกอย่างใน `main`** และเอาเนื้อหาไปไว้ใน `run() error` เพื่อให้ `defer` ทำงานได้
+- **โหลด config แค่ครั้งเดียวตอน startup** ใส่ลงใน struct ล้มเหลวทันทีถ้ามีสิ่งที่จำเป็นขาดหายไป
+- **กัน `net/http` ออกจากทุก package ยกเว้น package HTTP** และกัน SQL ออกจากทุก package ยกเว้น store
+- **ให้ import graph เป็นตัว review**: ถ้าคุณวาดมันเป็น DAG บนไวท์บอร์ดไม่ได้ แสดงว่าโครงสร้างผิด
+  ไม่ว่าไดเรกทอรีจะดูเป็นระเบียบแค่ไหนก็ตาม
+
+<CardGrid>
+  <Card
+    title="Error Handling →"
+    href="/docs/error-handling"
+    description="Custom error types, errors.As, and mapping domain errors to HTTP responses."
+  />
+</CardGrid>
