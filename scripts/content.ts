@@ -31,15 +31,60 @@ function createSlug(filePath: string): string {
   const relativePath = path.relative(docsDir, filePath)
   const parsed = path.parse(relativePath)
 
-  const slugPath = parsed.dir ? `${parsed.dir}/${parsed.name}` : parsed.name
-  const normalizedSlug = slugPath.replace(/\\/g, '/')
+  const isIndex = parsed.name === 'index' || parsed.name === 'index.th'
 
-  if (parsed.name === 'index') {
+  if (isIndex) {
     const dir = parsed.dir.replace(/\\/g, '/')
     return dir ? `/${dir}` : '/'
   }
 
-  return `/${normalizedSlug}`
+  const slugPath = parsed.dir ? `${parsed.dir}/${parsed.name}` : parsed.name
+  return `/${slugPath.replace(/\\/g, '/')}`
+}
+
+function localeOf(filePath: string): 'en' | 'th' {
+  return path.basename(filePath) === 'index.th.mdx' ? 'th' : 'en'
+}
+
+function collectDocSlugs(docs: Paths[], parentHref = ''): string[] {
+  const slugs: string[] = []
+
+  for (const doc of docs) {
+    if (!isRoute(doc)) continue
+
+    const fullHref = `${parentHref}${doc.href}`
+    if (!doc.noLink) slugs.push(fullHref)
+
+    if (doc.items) {
+      slugs.push(...collectDocSlugs(doc.items, fullHref))
+    }
+  }
+
+  return slugs
+}
+
+async function assertThaiTranslationsExist() {
+  const slugs = collectDocSlugs(Documents)
+  const missing: string[] = []
+
+  for (const slug of slugs) {
+    const thPath = path.join(docsDir, slug, 'index.th.mdx')
+    try {
+      await fs.access(thPath)
+    } catch {
+      missing.push(slug)
+    }
+  }
+
+  if (missing.length > 0) {
+    console.error(
+      `generate-content-json: ${missing.length} page(s) are missing contents/docs/<slug>/index.th.mdx:`
+    )
+    for (const slug of missing) {
+      console.error(`  - contents/docs${slug}/index.th.mdx`)
+    }
+    process.exit(1)
+  }
 }
 
 function findDocumentBySlug(slug: string): Paths | null {
@@ -160,9 +205,11 @@ async function processMdxFile(filePath: string) {
 
   const slug = createSlug(filePath)
   const matchedDoc = findDocumentBySlug(slug)
+  const locale = localeOf(filePath)
 
   return {
     slug,
+    locale,
     title: frontmatter.title || (matchedDoc && isRoute(matchedDoc) ? matchedDoc.title : 'Untitled'),
     description: frontmatter.description || '',
     content: documentContent,
@@ -193,6 +240,7 @@ async function getMdxFiles(dir: string): Promise<string[]> {
 
 async function convertMdxToJson() {
   try {
+    await assertThaiTranslationsExist()
     await ensureDirectoryExists(outputDir)
 
     const mdxFiles = await getMdxFiles(docsDir)
