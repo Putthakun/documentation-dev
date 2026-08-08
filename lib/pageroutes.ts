@@ -3,9 +3,11 @@ import { Documents } from '@/settings/documents'
 export type Paths =
   | {
       title: string
+      title_th: string
       href: string
       noLink?: true
       heading?: string
+      heading_th?: string
       items?: Paths[]
     }
   | {

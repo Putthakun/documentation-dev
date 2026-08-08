@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useLocale } from 'next-intl'
 import { usePathname } from '@/i18n/navigation'
 import { LuChevronDown, LuChevronRight } from 'react-icons/lu'
 
@@ -16,6 +17,7 @@ function isRoute(item: Paths): item is Extract<Paths, { title: string; href: str
 export function SubLink(props: Paths & { level: number; isSheet: boolean }) {
   const path = usePathname()
   const [isOpen, setIsOpen] = useState(true)
+  const locale = useLocale()
 
   useEffect(() => {
     if (isRoute(props) && props.href && path !== props.href && path.includes(props.href)) {
@@ -25,11 +27,12 @@ export function SubLink(props: Paths & { level: number; isSheet: boolean }) {
 
   if (!isRoute(props)) return
 
-  const { title, href, items, noLink, level, isSheet } = props
+  const { title, title_th, href, items, noLink, level, isSheet } = props
+  const label = locale === 'th' ? title_th : title
 
   const Comp = (
     <Anchor activeClassName="text-primary text-sm font-semibold" href={href}>
-      {title}
+      {label}
     </Anchor>
   )
 
@@ -40,7 +43,7 @@ export function SubLink(props: Paths & { level: number; isSheet: boolean }) {
       Comp
     )
   ) : (
-    <h2 className="font-bold text-primary sm:text-sm">{title}</h2>
+    <h2 className="font-bold text-primary sm:text-sm">{label}</h2>
   )
 
   if (!items) {
