@@ -38,11 +38,11 @@ export function Search() {
     () =>
       debounce((input) => {
         setIsLoading(true)
-        const results = advanceSearch(input.trim())
+        const results = advanceSearch(input.trim(), locale)
         setResults(results)
         setIsLoading(false)
       }, 300),
-    []
+    [locale]
   )
 
   useEffect(() => {

@@ -14,6 +14,7 @@ interface SearchDocument {
   _searchMeta: SearchMeta
   content: string
   description: string
+  locale: string
   slug: string
   title: string
 }
@@ -253,13 +254,17 @@ function extractSnippet(content: string, query: string): string {
   return snippet
 }
 
-export function advanceSearch(query: string) {
+export function advanceSearch(query: string, locale?: string) {
   const lowerQuery = query.toLowerCase().trim()
   const queryWords = lowerQuery.split(/\s+/).filter((word) => word.length >= 3)
 
   if (queryWords.length === 0) return []
 
-  const chunks = chunkArray(searchData, 100)
+  const localeFilteredData = locale
+    ? searchData.filter((doc) => doc.locale === locale)
+    : searchData
+
+  const chunks = chunkArray(localeFilteredData, 100)
 
   const results = chunks.flatMap((chunk) =>
     chunk
