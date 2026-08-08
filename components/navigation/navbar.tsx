@@ -5,6 +5,7 @@ import { useTranslations } from 'next-intl'
 import { LuArrowUpRight, LuGithub } from 'react-icons/lu'
 
 import { Anchor } from '@/components/anchor'
+import { LocaleToggle } from '@/components/navigation/locale-toggle'
 import { Logo } from '@/components/navigation/logo'
 import { Search } from '@/components/navigation/search'
 import { SheetLeft } from '@/components/sidebar'
@@ -41,6 +42,7 @@ export function Navbar() {
               <LuGithub className="size-4" />
             </Link>
           )}
+          <LocaleToggle />
           <ModeToggle />
         </div>
       </div>

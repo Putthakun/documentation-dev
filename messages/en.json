@@ -1,7 +1,8 @@
 {
   "navbar": {
     "docsLink": "Docs",
-    "githubLink": "View the repository on GitHub"
+    "githubLink": "View the repository on GitHub",
+    "languageToggle": "Switch language"
   },
   "search": {
     "placeholder": "Search..."

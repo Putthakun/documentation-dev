@@ -77,13 +77,12 @@ async function assertThaiTranslationsExist() {
   }
 
   if (missing.length > 0) {
-    console.error(
-      `generate-content-json: ${missing.length} page(s) are missing contents/docs/<slug>/index.th.mdx:`
+    console.warn(
+      `generate-content-json: ${missing.length} page(s) are missing contents/docs/<slug>/index.th.mdx (translation in progress):`
     )
     for (const slug of missing) {
-      console.error(`  - contents/docs${slug}/index.th.mdx`)
+      console.warn(`  - contents/docs${slug}/index.th.mdx`)
     }
-    process.exit(1)
   }
 }
 

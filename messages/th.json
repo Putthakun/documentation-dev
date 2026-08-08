@@ -1,7 +1,8 @@
 {
   "navbar": {
     "docsLink": "เอกสาร",
-    "githubLink": "ดู repository บน GitHub"
+    "githubLink": "ดู repository บน GitHub",
+    "languageToggle": "สลับภาษา"
   },
   "search": {
     "placeholder": "ค้นหา..."
