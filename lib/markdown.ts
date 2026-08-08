@@ -51,26 +51,28 @@ async function parseMdx<Frontmatter>(rawMdx: string) {
   })
 }
 
-const documentPath = (slug: string) => {
+const documentPath = (slug: string, locale: string) => {
+  const filename = locale === 'en' ? 'index.mdx' : `index.${locale}.mdx`
   return Settings.gitload
-    ? `${GitHubLink.href}/raw/main/contents/docs/${slug}/index.mdx`
-    : path.join(process.cwd(), '/contents/docs/', `${slug}/index.mdx`)
+    ? `${GitHubLink.href}/raw/main/contents/docs/${slug}/${filename}`
+    : path.join(process.cwd(), '/contents/docs/', `${slug}/${filename}`)
 }
 
 const getDocumentPath = (() => {
   const cache = new Map<string, string>()
 
-  return (slug: string) => {
-    if (!cache.has(slug)) {
-      cache.set(slug, documentPath(slug))
+  return (slug: string, locale: string) => {
+    const key = `${locale}:${slug}`
+    if (!cache.has(key)) {
+      cache.set(key, documentPath(slug, locale))
     }
-    return cache.get(slug)!
+    return cache.get(key)!
   }
 })()
 
-export const getDocument = cache(async (slug: string) => {
+export const getDocument = cache(async (slug: string, locale: string) => {
   try {
-    const contentPath = getDocumentPath(slug)
+    const contentPath = getDocumentPath(slug, locale)
 
     let mdx = ''
     let lastUpdated: string | null = null
@@ -92,7 +94,7 @@ export const getDocument = cache(async (slug: string) => {
     }
 
     const parsedMdx = await parseMdx<MdxHeaders>(mdx)
-    const tocs = await getTable(slug)
+    const tocs = await getTable(slug, locale)
 
     return {
       frontmatter: parsedMdx.frontmatter,
@@ -109,7 +111,8 @@ export const getDocument = cache(async (slug: string) => {
 const headingsRegex = /^(#{2,4})\s(.+)$/gm
 
 export async function getTable(
-  slug: string
+  slug: string,
+  locale: string
 ): Promise<{ level: number; text: string; href: string }[]> {
   const extractedHeadings: {
     level: number
@@ -117,9 +120,11 @@ export async function getTable(
     href: string
   }[] = []
 
+  const filename = locale === 'en' ? 'index.mdx' : `index.${locale}.mdx`
+
   let mdx = ''
   if (Settings.gitload) {
-    const contentPath = `${GitHubLink.href}/raw/main/contents/docs/${slug}/index.mdx`
+    const contentPath = `${GitHubLink.href}/raw/main/contents/docs/${slug}/${filename}`
     try {
       const response = await fetch(contentPath)
       if (!response.ok) {
@@ -131,7 +136,7 @@ export async function getTable(
       return []
     }
   } else {
-    const contentPath = path.join(process.cwd(), '/contents/docs/', `${slug}/index.mdx`)
+    const contentPath = path.join(process.cwd(), '/contents/docs/', `${slug}/${filename}`)
     try {
       const stream = createReadStream(contentPath, { encoding: 'utf-8' })
       for await (const chunk of stream) {

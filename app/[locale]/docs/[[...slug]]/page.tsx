@@ -10,13 +10,13 @@ import { PageRoutes } from '@/lib/pageroutes'
 import { Settings } from '@/types/settings'
 
 interface PageProps {
-  params: Promise<{ slug: string[] }>
+  params: Promise<{ locale: string; slug: string[] }>
 }
 
 export default async function Pages({ params }: PageProps) {
-  const { slug = [] } = await params
+  const { locale, slug = [] } = await params
   const pathName = slug.join('/')
-  const res = await getDocument(pathName)
+  const res = await getDocument(pathName, locale)
 
   if (!res) notFound()
 
@@ -42,13 +42,14 @@ export default async function Pages({ params }: PageProps) {
 }
 
 export async function generateMetadata({ params }: PageProps) {
-  const { slug = [] } = await params
+  const { locale, slug = [] } = await params
   const pathName = slug.join('/')
-  const res = await getDocument(pathName)
+  const res = await getDocument(pathName, locale)
 
   if (!res) return null
 
   const { frontmatter, lastUpdated } = res
+  const localePrefix = locale === 'en' ? '' : `/${locale}`
 
   return {
     title: `${frontmatter.title} - ${Settings.title}`,
@@ -60,7 +61,7 @@ export async function generateMetadata({ params }: PageProps) {
     openGraph: {
       title: `${frontmatter.title} - ${Settings.openGraph.title}`,
       description: frontmatter.description || Settings.openGraph.description,
-      url: `${Settings.metadataBase}/docs/${pathName}`,
+      url: `${Settings.metadataBase}${localePrefix}/docs/${pathName}`,
       siteName: Settings.openGraph.siteName,
       type: 'article',
       images: Settings.openGraph.images.map((image) => ({
@@ -79,7 +80,7 @@ export async function generateMetadata({ params }: PageProps) {
       })),
     },
     alternates: {
-      canonical: `${Settings.metadataBase}/docs/${pathName}`,
+      canonical: `${Settings.metadataBase}${localePrefix}/docs/${pathName}`,
     },
   }
 }
