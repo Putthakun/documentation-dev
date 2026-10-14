@@ -37,7 +37,7 @@ jobs:
         run: pnpm run generate-content-json
 
       - name: Upload search data artifact
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         if: success()
         with:
           name: search-data
